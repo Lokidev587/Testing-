@@ -1,23 +1,24 @@
 import os
 import logging
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-from telegram import ParseMode
+from telegram import ParseMode, ChatPermissions
 import re
 from datetime import datetime, timedelta
 import tempfile
 import cv2
 import numpy as np
+from io import BytesIO
 
-# Set up logging
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Configuration
-OWNER_ID = 8122582244  # Your Telegram user ID
-TELEGRAM_TOKEN = "7951953732:AAGEsXUyxbkjs5BKouKwcecGCLZ22cD0wuw"  # Replace with your new token
+# Configuration (use environment variables in production)
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', 'YOUR_BOT_TOKEN')
+OWNER_ID = int(os.getenv('OWNER_ID', '8122582244'))  # Your Telegram ID
 
 class AdvancedGroupProtector:
     def __init__(self):
@@ -28,18 +29,21 @@ class AdvancedGroupProtector:
         self.authorized_admins = []  # Admins who can post links
         self.whitelisted_domains = ['telegram.org', 'wikipedia.org', 'github.com']
         
-        # Content detection patterns
-        self.promo_keywords = ['buy now', 'discount', 'promo code', 'limited offer', 'click here']
-        self.drug_keywords = ['weed', 'cocaine', 'heroin', 'drugs', 'mdma', 'meth', 'opium']
+        # Content filters
+        self.promo_keywords = ['buy now', 'discount', 'promo', 'limited offer', 'shop now']
+        self.drug_keywords = ['weed', 'cocaine', 'heroin', 'drugs', 'meth', 'opium']
         self.weapon_keywords = ['gun', 'rifle', 'ammo', 'firearm', 'weapon', 'bomb']
         self.terror_keywords = ['isis', 'al-qaeda', 'terrorism', 'taliban']
         
+        # Initialize with basic settings
         self.setup_handlers()
-    
+        logger.info("Bot initialized successfully")
+
     def setup_handlers(self):
         # Admin commands
         self.dp.add_handler(CommandHandler("approve_admin", self.approve_admin))
         self.dp.add_handler(CommandHandler("revoke_admin", self.revoke_admin))
+        self.dp.add_handler(CommandHandler("status", self.bot_status))
         
         # Message handlers
         self.dp.add_handler(MessageHandler(
@@ -57,16 +61,12 @@ class AdvancedGroupProtector:
         
         # Error handler
         self.dp.add_error_handler(self.error_handler)
-    
-    # [Rest of your bot code remains the same...]
-    # ... (include all the other methods from the previous version)
 
-    
     # ========== ADMIN COMMANDS ==========
     def approve_admin(self, update, context):
         """Allow an admin to post links"""
         if update.message.from_user.id != OWNER_ID:
-            update.message.reply_text("❌ Only the owner can approve admins.")
+            update.message.reply_text("❌ Only owner can approve admins.")
             return
             
         try:
@@ -78,11 +78,11 @@ class AdvancedGroupProtector:
                 update.message.reply_text("ℹ️ Admin is already approved.")
         except (IndexError, ValueError):
             update.message.reply_text("⚠️ Usage: /approve_admin <admin_id>")
-    
+
     def revoke_admin(self, update, context):
         """Revoke an admin's link posting privileges"""
         if update.message.from_user.id != OWNER_ID:
-            update.message.reply_text("❌ Only the owner can revoke admin privileges.")
+            update.message.reply_text("❌ Only owner can revoke admin privileges.")
             return
             
         try:
@@ -94,12 +94,28 @@ class AdvancedGroupProtector:
                 update.message.reply_text("ℹ️ Admin wasn't approved.")
         except (IndexError, ValueError):
             update.message.reply_text("⚠️ Usage: /revoke_admin <admin_id>")
-    
+
+    def bot_status(self, update, context):
+        """Show bot status"""
+        if update.message.from_user.id != OWNER_ID:
+            return
+            
+        status = (
+            f"🛡️ Group Protector Bot Status\n"
+            f"• Approved Admins: {len(self.authorized_admins)}\n"
+            f"• Whitelisted Domains: {len(self.whitelisted_domains)}\n"
+            f"• Python: {os.sys.version.split()[0]}\n"
+            f"• NumPy: {np.__version__}\n"
+            f"• OpenCV: {cv2.__version__}"
+        )
+        update.message.reply_text(status)
+
     # ========== MESSAGE HANDLERS ==========
     def handle_text_messages(self, update, context):
         """Handle all text messages including links"""
-        if not update.message: return
-        
+        if not update.message:
+            return
+            
         message = update.message.text or update.message.caption or ""
         user = update.message.from_user
         chat = update.message.chat
@@ -115,7 +131,8 @@ class AdvancedGroupProtector:
         # Check for links (applies to everyone except owner and approved admins)
         if (self.contains_links(message) and 
             user.id != OWNER_ID and 
-            user.id not in self.authorized_admins):
+            user.id not in self.authorized_admins and
+            is_admin):  # This line ensures it affects admins too
             update.message.delete()
             self.warn_user(update, context, "🔗 Links require owner approval!")
             return
@@ -123,76 +140,93 @@ class AdvancedGroupProtector:
         # Check for illegal/dangerous content (applies to everyone)
         if self.contains_bad_content(message):
             update.message.delete()
-            self.ban_user(update, context, "🚫 Banned for illegal content")
+            self.ban_user(update, context, "🚫 Banned for policy violation")
             return
-    
+
     def handle_media(self, update, context):
         """Analyze all photos and documents"""
-        if not update.message: return
-        
+        if not update.message:
+            return
+            
         user = update.message.from_user
-        chat = update.message.chat
-        
-        # Skip if from owner
         if user.id == OWNER_ID:
             return
             
-        # Get the file (photo or document)
-        file = None
-        if update.message.photo:
-            file = context.bot.get_file(update.message.photo[-1].file_id)
-        elif update.message.document:
-            file = context.bot.get_file(update.message.document.file_id)
+        try:
+            # Get the file (photo or document)
+            file = None
+            if update.message.photo:
+                file = context.bot.get_file(update.message.photo[-1].file_id)
+            elif update.message.document:
+                file = context.bot.get_file(update.message.document.file_id)
+                
+            if not file:
+                return
+                
+            # Download and analyze the file
+            file_bytes = BytesIO()
+            file.download(out=file_bytes)
+            file_bytes.seek(0)
             
-        if not file: return
-        
-        # Download and analyze the file
-        with tempfile.NamedTemporaryFile() as tmp:
-            file.download(out=tmp)
-            tmp.seek(0)
+            # Convert to numpy array for OpenCV
+            file_bytes_arr = np.frombuffer(file_bytes.getvalue(), np.uint8)
+            img = cv2.imdecode(file_bytes_arr, cv2.IMREAD_COLOR)
             
+            if img is None:
+                return
+                
             # Check for explicit content
-            if self.detect_explicit_content(tmp.name):
+            if self.detect_explicit_content(img):
                 update.message.delete()
                 self.ban_user(update, context, "🔞 Banned for explicit content")
                 return
                 
             # Check for weapons
-            if self.detect_weapons(tmp.name):
+            if self.detect_weapons(img):
                 update.message.delete()
                 self.ban_user(update, context, "🔫 Banned for weapon content")
                 return
-    
+                
+        except Exception as e:
+            logger.error(f"Error processing media: {e}")
+
     def handle_stickers_gifs(self, update, context):
         """Analyze all stickers and GIFs"""
-        if not update.message: return
-        
+        if not update.message:
+            return
+            
         user = update.message.from_user
         if user.id == OWNER_ID:
             return
             
-        file = None
-        if update.message.sticker:
-            file = context.bot.get_file(update.message.sticker.file_id)
-        elif update.message.animation:
-            file = context.bot.get_file(update.message.animation.file_id)
+        try:
+            file = None
+            if update.message.sticker:
+                file = context.bot.get_file(update.message.sticker.file_id)
+            elif update.message.animation:
+                file = context.bot.get_file(update.message.animation.file_id)
+                
+            if not file:
+                return
+                
+            # Basic emoji check
+            if update.message.sticker and update.message.sticker.emoji in ['💣', '🔫', '💊', '⚔️']:
+                update.message.delete()
+                self.warn_user(update, context, "⚠️ Inappropriate sticker detected!")
+                return
+                
+            # More sophisticated checks would go here
+            # (e.g., hash matching against known bad content)
             
-        if not file: return
-            
-        # Check against known bad content hashes
-        file_hash = self.get_file_hash(file)
-        if (file_hash in self.banned_sticker_hashes or 
-            file_hash in self.banned_gif_hashes):
-            update.message.delete()
-            self.ban_user(update, context, "🚫 Banned for inappropriate media")
-            return
-    
-    # ========== CONTENT DETECTION METHODS ==========
+        except Exception as e:
+            logger.error(f"Error processing sticker/GIF: {e}")
+
+    # ========== DETECTION METHODS ==========
     def contains_links(self, text):
         """Check for non-whitelisted URLs"""
-        urls = re.findall(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', text)
+        urls = re.findall(r'https?://\S+', text.lower())
         return any(urls) and not any(domain in url for url in urls for domain in self.whitelisted_domains)
-    
+
     def contains_bad_content(self, text):
         """Check for prohibited keywords"""
         text_lower = text.lower()
@@ -200,15 +234,12 @@ class AdvancedGroupProtector:
                 any(kw in text_lower for kw in self.drug_keywords) or
                 any(kw in text_lower for kw in self.weapon_keywords) or
                 any(kw in text_lower for kw in self.terror_keywords))
-    
-    def detect_explicit_content(self, file_path):
+
+    def detect_explicit_content(self, img):
         """Basic explicit content detection using OpenCV"""
         try:
-            image = cv2.imread(file_path)
-            if image is None: return False
-            
             # Convert to HSV color space
-            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
             
             # Define skin color range
             lower_skin = np.array([0, 48, 80], dtype=np.uint8)
@@ -219,21 +250,21 @@ class AdvancedGroupProtector:
             
             # Calculate percentage of skin pixels
             skin_pixels = cv2.countNonZero(mask)
-            total_pixels = image.shape[0] * image.shape[1]
+            total_pixels = img.shape[0] * img.shape[1]
             skin_ratio = skin_pixels / total_pixels
             
             return skin_ratio > 0.3  # Threshold for explicit content
         except:
             return False
-    
-    def detect_weapons(self, file_path):
+
+    def detect_weapons(self, img):
         """Basic weapon detection using contour analysis"""
         try:
-            image = cv2.imread(file_path, 0)  # Read as grayscale
-            if image is None: return False
+            # Convert to grayscale
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
             # Edge detection
-            edges = cv2.Canny(image, 100, 200)
+            edges = cv2.Canny(gray, 100, 200)
             
             # Find contours
             contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
@@ -248,12 +279,7 @@ class AdvancedGroupProtector:
             return False
         except:
             return False
-    
-    def get_file_hash(self, file):
-        """Generate a simple hash for media files"""
-        file_bytes = file.download_as_bytearray()
-        return hash(bytes(file_bytes))
-    
+
     # ========== MODERATION ACTIONS ==========
     def warn_user(self, update, context, message):
         """Send a warning to the chat"""
@@ -263,7 +289,7 @@ class AdvancedGroupProtector:
             text=f"👮 @{user.username} {message}",
             parse_mode=ParseMode.MARKDOWN
         )
-    
+
     def ban_user(self, update, context, reason):
         """Ban a user temporarily"""
         user = update.message.from_user
@@ -279,17 +305,21 @@ class AdvancedGroupProtector:
             )
         except Exception as e:
             logger.error(f"Ban error: {e}")
-    
+
     def error_handler(self, update, context):
         """Log errors"""
-        logger.warning(f'Error: {context.error}')
-    
+        logger.error(f'Update "{update}" caused error "{context.error}"')
+
     def run(self):
         """Start the bot"""
+        logger.info("Starting bot...")
         self.updater.start_polling()
-        logger.info("Bot is running and protecting your groups!")
+        logger.info("Bot is now running and protecting your groups!")
         self.updater.idle()
 
 if __name__ == '__main__':
+    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN == 'YOUR_BOT_TOKEN':
+        raise ValueError("Please set the TELEGRAM_TOKEN environment variable")
+    
     protector = AdvancedGroupProtector()
     protector.run()
