@@ -28,7 +28,9 @@ if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 
 # Initialize NudeDetector
-nude_detector = NudeDetector()
+nude_detector = NudeDetector(
+ model_path="https://huggingface.co/MultimodalART/NudeNet/resolve/main/detector_v2_default_checkpoint.onnx"     
+)
 
 class HealthCheckServer(BaseHTTPRequestHandler):
     def do_GET(self):
