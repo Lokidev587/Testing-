@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: testing-lokii
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"  # or your bot's start command
+    pythonVersion: 3.10.13
