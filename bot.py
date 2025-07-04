@@ -1,16 +1,16 @@
 import os
 import logging
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-from telegram import ParseMode
+from telegram import Update, ParseMode
+from telegram.ext.callbackcontext import CallbackContext
 import re
 from datetime import datetime, timedelta
-import tempfile
 import cv2
 import numpy as np
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
 from io import BytesIO
 from PIL import Image
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Configure logging
 logging.basicConfig(
@@ -26,8 +26,7 @@ OWNER_ID = int(os.getenv('OWNER_ID', '8122582244'))  # Your Telegram ID
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
 
-# Dummy web server for Render health checks
-class HealthCheckHandler(BaseHTTPRequestHandler):
+class HealthCheckServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain')
@@ -35,24 +34,23 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'Bot is running and protecting your group!')
 
 def run_health_server():
-    server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
-    logger.info("Dummy web server running on port 8080")
+    server = HTTPServer(('0.0.0.0', 8080), HealthCheckServer)
+    logger.info("Health check server running on port 8080")
     server.serve_forever()
 
-class GroupProtectorBot:
+class GroupSecurityBot:
     def __init__(self):
         self.updater = Updater(TELEGRAM_TOKEN, use_context=True)
         self.dp = self.updater.dispatcher
         
         # Security settings
-        self.authorized_admins = []  # Admins who can post links
+        self.authorized_users = [OWNER_ID]  # Users allowed to post links
         self.whitelisted_domains = ['telegram.org', 'wikipedia.org', 'github.com']
         
         # Content filters
-        self.promo_keywords = ['buy now', 'discount', 'promo code', 'shop now']
+        self.promo_keywords = ['buy now', 'discount', 'promo', 'shop now']
         self.drug_keywords = ['weed', 'cocaine', 'heroin', 'drugs']
         self.weapon_keywords = ['gun', 'rifle', 'ammo', 'firearm']
-        self.terror_keywords = ['isis', 'terrorism', 'bomb']
         
         self.setup_handlers()
         logger.info("Bot initialized successfully")
@@ -62,27 +60,32 @@ class GroupProtectorBot:
         self.dp.add_handler(CommandHandler("start", self.send_welcome))
         
         # Admin commands
-        self.dp.add_handler(CommandHandler("approve_admin", self.approve_admin))
-        self.dp.add_handler(CommandHandler("revoke_admin", self.revoke_admin))
+        self.dp.add_handler(CommandHandler("authorize", self.authorize_user))
+        self.dp.add_handler(CommandHandler("unauthorize", self.unauthorize_user))
         
-        # Message handlers
+        # Message handlers - IMPORTANT: Set group=-100 to ensure handlers work in groups
         self.dp.add_handler(MessageHandler(
             Filters.text | Filters.caption, 
-            self.handle_text_messages
-        ))
+            self.handle_text,
+            run_async=True
+        ), group=-100)
+        
         self.dp.add_handler(MessageHandler(
             Filters.photo | Filters.document, 
-            self.handle_media
-        ))
+            self.handle_media,
+            run_async=True
+        ), group=-100)
+        
         self.dp.add_handler(MessageHandler(
             Filters.sticker | Filters.animation, 
-            self.handle_stickers_gifs
-        ))
+            self.handle_stickers,
+            run_async=True
+        ), group=-100)
         
         # Error handler
         self.dp.add_error_handler(self.error_handler)
 
-    def send_welcome(self, update, context):
+    def send_welcome(self, update: Update, context: CallbackContext):
         """Send welcome message when /start is used"""
         welcome_text = (
             "🛡️ *Group Protection Bot*\n\n"
@@ -94,89 +97,84 @@ class GroupProtectorBot:
             "- Remove inappropriate media\n"
             "- Ban users who violate rules\n\n"
             "Owner commands:\n"
-            "/approve_admin <user_id> - Allow admin to post links\n"
-            "/revoke_admin <user_id> - Revoke link permissions"
+            "/authorize <user_id> - Allow user to post links\n"
+            "/unauthorize <user_id> - Revoke link permissions"
         )
         update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
 
-    def approve_admin(self, update, context):
-        """Allow an admin to post links"""
-        if update.message.from_user.id != OWNER_ID:
-            update.message.reply_text("❌ Only owner can approve admins.")
+    def authorize_user(self, update: Update, context: CallbackContext):
+        """Allow a user to post links"""
+        if update.effective_user.id != OWNER_ID:
+            update.message.reply_text("❌ Only owner can authorize users.")
             return
             
         try:
-            admin_id = int(context.args[0])
-            if admin_id not in self.authorized_admins:
-                self.authorized_admins.append(admin_id)
-                update.message.reply_text(f"✅ Admin {admin_id} can now post links.")
+            user_id = int(context.args[0])
+            if user_id not in self.authorized_users:
+                self.authorized_users.append(user_id)
+                update.message.reply_text(f"✅ User {user_id} can now post links.")
             else:
-                update.message.reply_text("ℹ️ Admin is already approved.")
+                update.message.reply_text("ℹ️ User is already authorized.")
         except (IndexError, ValueError):
-            update.message.reply_text("⚠️ Usage: /approve_admin <admin_id>")
+            update.message.reply_text("⚠️ Usage: /authorize <user_id>")
 
-    def revoke_admin(self, update, context):
-        """Revoke an admin's link posting privileges"""
-        if update.message.from_user.id != OWNER_ID:
-            update.message.reply_text("❌ Only owner can revoke admin privileges.")
+    def unauthorize_user(self, update: Update, context: CallbackContext):
+        """Revoke a user's link posting privileges"""
+        if update.effective_user.id != OWNER_ID:
+            update.message.reply_text("❌ Only owner can unauthorize users.")
             return
             
         try:
-            admin_id = int(context.args[0])
-            if admin_id in self.authorized_admins:
-                self.authorized_admins.remove(admin_id)
-                update.message.reply_text(f"✅ Admin {admin_id} can no longer post links.")
+            user_id = int(context.args[0])
+            if user_id in self.authorized_users:
+                self.authorized_users.remove(user_id)
+                update.message.reply_text(f"✅ User {user_id} can no longer post links.")
             else:
-                update.message.reply_text("ℹ️ Admin wasn't approved.")
+                update.message.reply_text("ℹ️ User wasn't authorized.")
         except (IndexError, ValueError):
-            update.message.reply_text("⚠️ Usage: /revoke_admin <admin_id>")
+            update.message.reply_text("⚠️ Usage: /unauthorize <user_id>")
 
-    def handle_text_messages(self, update, context):
+    def handle_text(self, update: Update, context: CallbackContext):
         """Handle all text messages including links"""
-        if not update.message:
+        if not update.message or not update.message.chat:
             return
             
         message = update.message.text or update.message.caption or ""
-        user = update.message.from_user
+        user = update.effective_user
         
-        # Check if sender is admin (bot or human)
-        is_admin = False
-        if user.id == context.bot.id:
-            is_admin = True
-        else:
-            chat_member = update.message.chat.get_member(user.id)
-            is_admin = chat_member.status in ['administrator', 'creator']
-        
-        # Check for links (applies to everyone except owner and approved admins)
-        if (self.contains_links(message) and 
-            user.id != OWNER_ID and 
-            user.id not in self.authorized_admins and
-            is_admin):
-            update.message.delete()
-            self.warn_user(update, context, "🔗 Links require owner approval!")
+        # Check for links (applies to everyone except authorized users)
+        if self.contains_links(message) and user.id not in self.authorized_users:
+            try:
+                update.message.delete()
+                self.warn_user(update, context, "🔗 Links require authorization!")
+            except Exception as e:
+                logger.error(f"Failed to delete message: {e}")
             return
             
-        # Check for illegal/dangerous content (applies to everyone)
+        # Check for bad content (applies to everyone)
         if self.contains_bad_content(message):
-            update.message.delete()
-            self.ban_user(update, context, "🚫 Banned for policy violation")
+            try:
+                update.message.delete()
+                self.ban_user(update, context, "🚫 Banned for policy violation")
+            except Exception as e:
+                logger.error(f"Failed to delete bad content: {e}")
 
-    def handle_media(self, update, context):
+    def handle_media(self, update: Update, context: CallbackContext):
         """Analyze all photos and documents"""
-        if not update.message:
+        if not update.message or not update.message.chat:
             return
             
-        user = update.message.from_user
-        if user.id == OWNER_ID:
+        user = update.effective_user
+        if user.id in self.authorized_users:
             return
             
         try:
             # Get the file (photo or document)
             file = None
             if update.message.photo:
-                file = context.bot.get_file(update.message.photo[-1].file_id)
+                file = update.message.photo[-1].get_file()
             elif update.message.document:
-                file = context.bot.get_file(update.message.document.file_id)
+                file = update.message.document.get_file()
                 
             if not file:
                 return
@@ -213,19 +211,22 @@ class GroupProtectorBot:
         except Exception as e:
             logger.error(f"Error processing media: {e}")
 
-    def handle_stickers_gifs(self, update, context):
+    def handle_stickers(self, update: Update, context: CallbackContext):
         """Analyze all stickers and GIFs"""
-        if not update.message:
+        if not update.message or not update.message.chat:
             return
             
-        user = update.message.from_user
-        if user.id == OWNER_ID:
+        user = update.effective_user
+        if user.id in self.authorized_users:
             return
             
         sticker = update.message.sticker
         if sticker and sticker.emoji in ['💣', '🔫', '💊']:
-            update.message.delete()
-            self.warn_user(update, context, "⚠️ Inappropriate sticker detected!")
+            try:
+                update.message.delete()
+                self.warn_user(update, context, "⚠️ Inappropriate sticker removed!")
+            except Exception as e:
+                logger.error(f"Failed to delete sticker: {e}")
 
     def contains_links(self, text):
         """Check for non-whitelisted URLs"""
@@ -237,8 +238,7 @@ class GroupProtectorBot:
         text_lower = text.lower()
         return (any(kw in text_lower for kw in self.promo_keywords) or
                any(kw in text_lower for kw in self.drug_keywords) or
-               any(kw in text_lower for kw in self.weapon_keywords) or
-               any(kw in text_lower for kw in self.terror_keywords))
+               any(kw in text_lower for kw in self.weapon_keywords))
 
     def detect_explicit_content(self, img):
         """Basic explicit content detection"""
@@ -268,32 +268,33 @@ class GroupProtectorBot:
             logger.error(f"Weapon detection error: {e}")
             return False
 
-    def warn_user(self, update, context, message):
+    def warn_user(self, update: Update, context: CallbackContext, message: str):
         """Send a warning to the chat"""
-        user = update.message.from_user
-        context.bot.send_message(
-            chat_id=update.message.chat_id,
-            text=f"👮 @{user.username} {message}",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        try:
+            context.bot.send_message(
+                chat_id=update.message.chat_id,
+                text=f"👮 @{update.effective_user.username} {message}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to send warning: {e}")
 
-    def ban_user(self, update, context, reason):
+    def ban_user(self, update: Update, context: CallbackContext, reason: str):
         """Ban a user temporarily"""
-        user = update.message.from_user
         try:
             context.bot.ban_chat_member(
                 chat_id=update.message.chat_id,
-                user_id=user.id,
+                user_id=update.effective_user.id,
                 until_date=datetime.now() + timedelta(days=1))
             context.bot.send_message(
                 chat_id=update.message.chat_id,
-                text=f"🚨 @{user.username} was banned. Reason: {reason}",
+                text=f"🚨 @{update.effective_user.username} was banned. Reason: {reason}",
                 parse_mode=ParseMode.MARKDOWN
             )
         except Exception as e:
             logger.error(f"Ban error: {e}")
 
-    def error_handler(self, update, context):
+    def error_handler(self, update: Update, context: CallbackContext):
         """Log errors"""
         logger.error(f'Update "{update}" caused error "{context.error}"')
 
@@ -304,11 +305,11 @@ class GroupProtectorBot:
         server_thread.daemon = True
         server_thread.start()
         
-        # Start the bot
-        self.updater.start_polling()
+        # Start the bot with proper group handlers
+        self.updater.start_polling(drop_pending_updates=True)
         logger.info("Bot is now running and protecting your groups!")
         self.updater.idle()
 
 if __name__ == '__main__':
-    bot = GroupProtectorBot()
+    bot = GroupSecurityBot()
     bot.run()
