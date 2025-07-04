@@ -207,7 +207,7 @@ class GroupSecurityBot:
             logger.error(f"Ban error: {e}")
 
     def error_handler(self, update: Update, context: CallbackContext):
-        logger.error(f'Update "{update}" caused error "{context.error}")
+        logger.error(f'Update "{update}" caused error "{context.error}"')
 
     def run(self):
         server_thread = threading.Thread(target=run_health_server)
