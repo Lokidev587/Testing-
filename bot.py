@@ -96,7 +96,7 @@ class GroupProtectionBot:
             "/revoke_admin <user_id> - Revoke link permissions\n"
             "/ban_sticker - Reply to a sticker to ban it"
         )
-        update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
+        update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
 
     def cmd_approve_admin(self, update: Update, context: CallbackContext):
         if update.effective_user.id != OWNER_ID:
