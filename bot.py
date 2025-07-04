@@ -1,7 +1,7 @@
 import os
 import logging
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-from telegram import ParseMode, ChatPermissions
+from telegram import ParseMode
 import re
 from datetime import datetime, timedelta
 import tempfile
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 OWNER_ID = 8122582244  # Your Telegram user ID
-TELEGRAM_TOKEN = "7951953732:AAGEsXUyxbkjs5BKouKwcecGCLZ22cD0wuw"  # Your bot token
+TELEGRAM_TOKEN = "7951953732:AAGEsXUyxbkjs5BKouKwcecGCLZ22cD0wuw"  # Replace with your new token
 
 class AdvancedGroupProtector:
     def __init__(self):
@@ -33,10 +33,6 @@ class AdvancedGroupProtector:
         self.drug_keywords = ['weed', 'cocaine', 'heroin', 'drugs', 'mdma', 'meth', 'opium']
         self.weapon_keywords = ['gun', 'rifle', 'ammo', 'firearm', 'weapon', 'bomb']
         self.terror_keywords = ['isis', 'al-qaeda', 'terrorism', 'taliban']
-        
-        # Known bad content hashes (would be populated from a database in production)
-        self.banned_sticker_hashes = set()
-        self.banned_gif_hashes = set()
         
         self.setup_handlers()
     
@@ -61,6 +57,10 @@ class AdvancedGroupProtector:
         
         # Error handler
         self.dp.add_error_handler(self.error_handler)
+    
+    # [Rest of your bot code remains the same...]
+    # ... (include all the other methods from the previous version)
+
     
     # ========== ADMIN COMMANDS ==========
     def approve_admin(self, update, context):
