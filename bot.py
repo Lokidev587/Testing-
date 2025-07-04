@@ -1,16 +1,17 @@
 import os
 import logging
+import requests
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
 from telegram import Update, ParseMode
 from telegram.ext.callbackcontext import CallbackContext
 import re
 from datetime import datetime, timedelta
-import cv2
-import numpy as np
 from io import BytesIO
 from PIL import Image
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import numpy as np
+from nudenet import NudeDetector
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +26,9 @@ OWNER_ID = int(os.getenv('OWNER_ID', '8122582244'))  # Your Telegram ID
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN environment variable not set!")
+
+# Initialize NudeDetector
+nude_detector = NudeDetector()
 
 class HealthCheckServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -44,13 +48,16 @@ class GroupSecurityBot:
         self.dp = self.updater.dispatcher
         
         # Security settings
-        self.authorized_users = [OWNER_ID]  # Users allowed to post links
+        self.authorized_users = [OWNER_ID]
         self.whitelisted_domains = ['telegram.org', 'wikipedia.org', 'github.com']
         
         # Content filters
         self.promo_keywords = ['buy now', 'discount', 'promo', 'shop now']
         self.drug_keywords = ['weed', 'cocaine', 'heroin', 'drugs']
         self.weapon_keywords = ['gun', 'rifle', 'ammo', 'firearm']
+        
+        # Banned sticker file_unique_ids (more reliable than hashes)
+        self.banned_stickers = set()
         
         self.setup_handlers()
         logger.info("Bot initialized successfully")
@@ -62,8 +69,9 @@ class GroupSecurityBot:
         # Admin commands
         self.dp.add_handler(CommandHandler("authorize", self.authorize_user))
         self.dp.add_handler(CommandHandler("unauthorize", self.unauthorize_user))
+        self.dp.add_handler(CommandHandler("ban_sticker", self.ban_sticker))
         
-        # Message handlers - IMPORTANT: Set group=-100 to ensure handlers work in groups
+        # Message handlers
         self.dp.add_handler(MessageHandler(
             Filters.text | Filters.caption, 
             self.handle_text,
@@ -86,7 +94,6 @@ class GroupSecurityBot:
         self.dp.add_error_handler(self.error_handler)
 
     def send_welcome(self, update: Update, context: CallbackContext):
-        """Send welcome message when /start is used"""
         welcome_text = (
             "🛡️ *Group Protection Bot*\n\n"
             "Add me to your group as admin with these permissions:\n"
@@ -94,16 +101,16 @@ class GroupSecurityBot:
             "- Ban users\n\n"
             "I will automatically:\n"
             "- Delete all unauthorized links\n"
-            "- Remove inappropriate media\n"
+            "- Remove inappropriate media and stickers\n"
             "- Ban users who violate rules\n\n"
             "Owner commands:\n"
             "/authorize <user_id> - Allow user to post links\n"
-            "/unauthorize <user_id> - Revoke link permissions"
+            "/unauthorize <user_id> - Revoke link permissions\n"
+            "/ban_sticker - Reply to a sticker to ban it"
         )
         update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
 
     def authorize_user(self, update: Update, context: CallbackContext):
-        """Allow a user to post links"""
         if update.effective_user.id != OWNER_ID:
             update.message.reply_text("❌ Only owner can authorize users.")
             return
@@ -119,7 +126,6 @@ class GroupSecurityBot:
             update.message.reply_text("⚠️ Usage: /authorize <user_id>")
 
     def unauthorize_user(self, update: Update, context: CallbackContext):
-        """Revoke a user's link posting privileges"""
         if update.effective_user.id != OWNER_ID:
             update.message.reply_text("❌ Only owner can unauthorize users.")
             return
@@ -134,15 +140,26 @@ class GroupSecurityBot:
         except (IndexError, ValueError):
             update.message.reply_text("⚠️ Usage: /unauthorize <user_id>")
 
+    def ban_sticker(self, update: Update, context: CallbackContext):
+        if update.effective_user.id != OWNER_ID:
+            update.message.reply_text("❌ Only owner can ban stickers.")
+            return
+            
+        if not update.message.reply_to_message or not update.message.reply_to_message.sticker:
+            update.message.reply_text("⚠️ Please reply to a sticker to ban it.")
+            return
+            
+        sticker = update.message.reply_to_message.sticker
+        self.banned_stickers.add(sticker.file_unique_id)
+        update.message.reply_text(f"✅ Sticker banned (ID: {sticker.file_unique_id})")
+
     def handle_text(self, update: Update, context: CallbackContext):
-        """Handle all text messages including links"""
         if not update.message or not update.message.chat:
             return
             
         message = update.message.text or update.message.caption or ""
         user = update.effective_user
         
-        # Check for links (applies to everyone except authorized users)
         if self.contains_links(message) and user.id not in self.authorized_users:
             try:
                 update.message.delete()
@@ -151,7 +168,6 @@ class GroupSecurityBot:
                 logger.error(f"Failed to delete message: {e}")
             return
             
-        # Check for bad content (applies to everyone)
         if self.contains_bad_content(message):
             try:
                 update.message.delete()
@@ -160,7 +176,6 @@ class GroupSecurityBot:
                 logger.error(f"Failed to delete bad content: {e}")
 
     def handle_media(self, update: Update, context: CallbackContext):
-        """Analyze all photos and documents"""
         if not update.message or not update.message.chat:
             return
             
@@ -169,7 +184,6 @@ class GroupSecurityBot:
             return
             
         try:
-            # Get the file (photo or document)
             file = None
             if update.message.photo:
                 file = update.message.photo[-1].get_file()
@@ -179,40 +193,29 @@ class GroupSecurityBot:
             if not file:
                 return
                 
-            # Download and analyze the file
             file_bytes = BytesIO()
             file.download(out=file_bytes)
             file_bytes.seek(0)
             
-            # Use Pillow to open image
-            img = Image.open(file_bytes)
-            
-            # Convert to numpy array for OpenCV
-            img_cv = np.array(img)
-            if len(img_cv.shape) == 2:  # Grayscale
-                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2BGR)
-            elif img_cv.shape[2] == 4:  # RGBA
-                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_RGBA2BGR)
-            else:  # RGB
-                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_RGB2BGR)
-            
-            # Check for explicit content
-            if self.detect_explicit_content(img_cv):
-                update.message.delete()
-                self.ban_user(update, context, "🔞 Banned for explicit content")
-                return
+            # Save to temp file for NudeNet
+            with tempfile.NamedTemporaryFile(suffix='.jpg') as temp:
+                img = Image.open(file_bytes)
+                img.save(temp.name, format='JPEG')
                 
-            # Check for weapons
-            if self.detect_weapons(img_cv):
-                update.message.delete()
-                self.ban_user(update, context, "🔫 Banned for weapon content")
-                return
+                # Detect NSFW content
+                detections = nude_detector.detect(temp.name)
                 
+                # Check for explicit content
+                for detection in detections:
+                    if detection['class'] in ['EXPOSED_BREAST_F', 'EXPOSED_GENITALIA_F', 'EXPOSED_GENITALIA_M']:
+                        update.message.delete()
+                        self.ban_user(update, context, "🔞 Banned for explicit content")
+                        return
+                        
         except Exception as e:
             logger.error(f"Error processing media: {e}")
 
     def handle_stickers(self, update: Update, context: CallbackContext):
-        """Analyze all stickers and GIFs"""
         if not update.message or not update.message.chat:
             return
             
@@ -221,55 +224,57 @@ class GroupSecurityBot:
             return
             
         sticker = update.message.sticker
-        if sticker and sticker.emoji in ['💣', '🔫', '💊']:
+        if not sticker:
+            return
+            
+        # Check if sticker is banned
+        if sticker.file_unique_id in self.banned_stickers:
             try:
                 update.message.delete()
-                self.warn_user(update, context, "⚠️ Inappropriate sticker removed!")
+                self.warn_user(update, context, "⚠️ Banned sticker removed!")
+                return
             except Exception as e:
                 logger.error(f"Failed to delete sticker: {e}")
+                return
+                
+        # Download and check sticker with NudeNet
+        try:
+            file = sticker.get_file()
+            file_bytes = BytesIO()
+            file.download(out=file_bytes)
+            file_bytes.seek(0)
+            
+            # Save to temp file
+            with tempfile.NamedTemporaryFile(suffix='.webp') as temp:
+                img = Image.open(file_bytes)
+                img.save(temp.name, format='WEBP')
+                
+                # Detect NSFW content
+                detections = nude_detector.detect(temp.name)
+                
+                # Check for explicit content
+                for detection in detections:
+                    if detection['class'] in ['EXPOSED_BREAST_F', 'EXPOSED_GENITALIA_F', 'EXPOSED_GENITALIA_M']:
+                        update.message.delete()
+                        self.ban_user(update, context, "🔞 Banned for explicit sticker")
+                        # Add to banned stickers
+                        self.banned_stickers.add(sticker.file_unique_id)
+                        return
+                        
+        except Exception as e:
+            logger.error(f"Error processing sticker: {e}")
 
     def contains_links(self, text):
-        """Check for non-whitelisted URLs"""
         urls = re.findall(r'https?://\S+', text.lower())
         return any(urls) and not any(domain in url for url in urls for domain in self.whitelisted_domains)
 
     def contains_bad_content(self, text):
-        """Check for prohibited keywords"""
         text_lower = text.lower()
         return (any(kw in text_lower for kw in self.promo_keywords) or
                any(kw in text_lower for kw in self.drug_keywords) or
                any(kw in text_lower for kw in self.weapon_keywords))
 
-    def detect_explicit_content(self, img):
-        """Basic explicit content detection"""
-        try:
-            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-            lower_skin = np.array([0, 48, 80], dtype=np.uint8)
-            upper_skin = np.array([20, 255, 255], dtype=np.uint8)
-            mask = cv2.inRange(hsv, lower_skin, upper_skin)
-            skin_ratio = cv2.countNonZero(mask) / (img.shape[0] * img.shape[1])
-            return skin_ratio > 0.3
-        except Exception as e:
-            logger.error(f"Explicit content detection error: {e}")
-            return False
-
-    def detect_weapons(self, img):
-        """Basic weapon detection"""
-        try:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            edges = cv2.Canny(gray, 100, 200)
-            contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-            for cnt in contours:
-                approx = cv2.approxPolyDP(cnt, 0.01*cv2.arcLength(cnt, True), True)
-                if len(approx) in [4, 5, 6] and cv2.contourArea(cnt) > 500:
-                    return True
-            return False
-        except Exception as e:
-            logger.error(f"Weapon detection error: {e}")
-            return False
-
     def warn_user(self, update: Update, context: CallbackContext, message: str):
-        """Send a warning to the chat"""
         try:
             context.bot.send_message(
                 chat_id=update.message.chat_id,
@@ -280,7 +285,6 @@ class GroupSecurityBot:
             logger.error(f"Failed to send warning: {e}")
 
     def ban_user(self, update: Update, context: CallbackContext, reason: str):
-        """Ban a user temporarily"""
         try:
             context.bot.ban_chat_member(
                 chat_id=update.message.chat_id,
@@ -295,17 +299,15 @@ class GroupSecurityBot:
             logger.error(f"Ban error: {e}")
 
     def error_handler(self, update: Update, context: CallbackContext):
-        """Log errors"""
         logger.error(f'Update "{update}" caused error "{context.error}"')
 
     def run(self):
-        """Start the bot and web server"""
-        # Start health check server in a separate thread
+        # Start health check server
         server_thread = threading.Thread(target=run_health_server)
         server_thread.daemon = True
         server_thread.start()
         
-        # Start the bot with proper group handlers
+        # Start the bot
         self.updater.start_polling(drop_pending_updates=True)
         logger.info("Bot is now running and protecting your groups!")
         self.updater.idle()
