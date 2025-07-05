@@ -227,7 +227,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 10,
                 chat_id=chat_id,
                 message_id=warning.message_id,
-                name=str(warning.message_id)
+                name=str(warning.message_id))
         except Exception as e:
             logger.error(f"Error handling links: {e}")
     except Exception as e:
