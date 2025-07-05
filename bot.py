@@ -1,222 +1,114 @@
 import os
-import logging
+from pyrogram import Client, filters
+from pyrogram.types import Message
+from nudenet import NudeClassifier
+from PIL import Image
 import re
 import cv2
-import numpy as np
-from io import BytesIO
-from PIL import Image
-import threading
-from datetime import datetime, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
-from telegram import Update, ParseMode
-from telegram.ext.callbackcontext import CallbackContext
-from nudenet import NudeDetector
+import tempfile
 
-# Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# --- CONFIG ---
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+OWNER_ID = 8122582244  # Replace with your Telegram User ID
 
-# Configuration
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-OWNER_ID = int(os.getenv('OWNER_ID', '8122582244'))
+# --- INIT ---
+app = Client("bot", bot_token=BOT_TOKEN)
+classifier = NudeClassifier()
+AUTHORIZED_USERS = set()
+AUTHORIZED_ADMINS = set()
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN environment variable not set!")
+# --- HELPERS ---
 
-# NudeDetector
-nude_detector = NudeDetector()
+def contains_link(text):
+    return bool(re.search(r'https?://|www\.', text))
 
-class HealthCheckServer(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'Bot is running and protecting your group!')
+def is_nsfw_image(file_path):
+    result = classifier.classify(file_path)
+    return result[file_path]['unsafe'] > 0.6
 
-def run_health_server():
-    server = HTTPServer(('0.0.0.0', 8080), HealthCheckServer)
-    logger.info("Health check server running on port 8080")
-    server.serve_forever()
+def extract_frames_from_video(file_path, max_frames=10):
+    cap = cv2.VideoCapture(file_path)
+    frames = []
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    step = max(1, total // max_frames)
 
-class GroupSecurityBot:
-    def __init__(self):
-        self.updater = Updater(TELEGRAM_TOKEN, use_context=True)
-        self.dp = self.updater.dispatcher
-        self.authorized_users = [OWNER_ID]
-        self.whitelisted_domains = ['telegram.org', 'wikipedia.org', 'github.com']
-        self.promo_keywords = ['buy now', 'discount', 'promo', 'shop now']
-        self.drug_keywords = ['weed', 'cocaine', 'heroin', 'drugs']
-        self.weapon_keywords = ['gun', 'rifle', 'ammo', 'firearm']
-        self.setup_handlers()
-        logger.info("Bot initialized successfully")
+    for i in range(0, total, step):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+        ret, frame = cap.read()
+        if not ret:
+            break
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        cv2.imwrite(tmp.name, frame)
+        frames.append(tmp.name)
+    cap.release()
+    return frames
 
-    def setup_handlers(self):
-        self.dp.add_handler(CommandHandler("start", self.send_welcome))
-        self.dp.add_handler(CommandHandler("authorize", self.authorize_user))
-        self.dp.add_handler(CommandHandler("unauthorize", self.unauthorize_user))
-        self.dp.add_handler(MessageHandler(Filters.text | Filters.caption, self.handle_text, run_async=True), group=-100)
-        self.dp.add_handler(MessageHandler(Filters.photo | Filters.document, self.handle_media, run_async=True), group=-100)
-        self.dp.add_handler(MessageHandler(Filters.sticker | Filters.animation, self.handle_stickers, run_async=True), group=-100)
-        self.dp.add_error_handler(self.error_handler)
+async def is_nsfw_video(file_path):
+    frames = extract_frames_from_video(file_path)
+    for f in frames:
+        if is_nsfw_image(f):
+            return True
+    return False
 
-    def send_welcome(self, update: Update, context: CallbackContext):
-        welcome_text = (
-            "\U0001F6E1\uFE0F <b>Group Protection Bot</b>\n\n"
-            "Add me to your group as admin with these permissions:\n"
-            "- Delete messages\n- Ban users\n\n"
-            "I will automatically:\n"
-            "- Delete unauthorized links\n"
-            "- Remove porn, drugs, or weapon content\n"
-            "- Ban violators\n\n"
-            "<b>Owner commands:</b>\n"
-            "/authorize &lt;user_id&gt;\n/unauthorize &lt;user_id&gt;"
-        )
-        update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
+# --- COMMANDS ---
 
-    def authorize_user(self, update: Update, context: CallbackContext):
-        if update.effective_user.id != OWNER_ID:
-            update.message.reply_text("❌ Only owner can authorize users.")
+@app.on_message(filters.command("approve") & filters.user(OWNER_ID))
+async def approve(_, m: Message):
+    if m.reply_to_message:
+        uid = m.reply_to_message.from_user.id
+        AUTHORIZED_USERS.add(uid)
+        await m.reply(f"✅ Approved user {uid}")
+    else:
+        await m.reply("❗ Reply to a message to approve that user.")
+
+@app.on_message(filters.command("approveadmin") & filters.user(OWNER_ID))
+async def approveadmin(_, m: Message):
+    if m.reply_to_message:
+        uid = m.reply_to_message.from_user.id
+        AUTHORIZED_ADMINS.add(uid)
+        await m.reply(f"✅ Approved admin {uid}")
+    else:
+        await m.reply("❗ Reply to a message to approve that admin.")
+
+# --- NSFW CHECK ---
+
+@app.on_message(filters.group & (filters.photo | filters.document | filters.animation | filters.sticker))
+async def nsfw_check(_, m: Message):
+    try:
+        path = await m.download()
+        nsfw = False
+        if m.photo or (m.document and m.document.mime_type.startswith("image/")):
+            nsfw = is_nsfw_image(path)
+        elif m.animation or m.sticker:
+            nsfw = await is_nsfw_video(path)
+
+        if nsfw:
+            await m.delete()
+            await m.reply("❌ NSFW content removed.")
+    except Exception as e:
+        print("NSFW detection error:", e)
+
+# --- LINK BLOCKER ---
+
+@app.on_message(filters.group & filters.text & ~filters.service)
+async def link_blocker(_, m: Message):
+    uid = m.from_user.id
+    member = await app.get_chat_member(m.chat.id, uid)
+    is_admin = member.status in ["administrator", "creator"]
+
+    if contains_link(m.text):
+        if uid == OWNER_ID:
             return
-        try:
-            user_id = int(context.args[0])
-            if user_id not in self.authorized_users:
-                self.authorized_users.append(user_id)
-                update.message.reply_text(f"✅ User {user_id} authorized.")
-            else:
-                update.message.reply_text("ℹ️ Already authorized.")
-        except:
-            update.message.reply_text("⚠️ Usage: /authorize <user_id>")
+        if is_admin and uid not in AUTHORIZED_ADMINS:
+            await m.delete()
+        elif not is_admin and uid not in AUTHORIZED_USERS:
+            await m.delete()
 
-    def unauthorize_user(self, update: Update, context: CallbackContext):
-        if update.effective_user.id != OWNER_ID:
-            update.message.reply_text("❌ Only owner can unauthorize users.")
-            return
-        try:
-            user_id = int(context.args[0])
-            if user_id in self.authorized_users:
-                self.authorized_users.remove(user_id)
-                update.message.reply_text(f"✅ User {user_id} unauthorized.")
-            else:
-                update.message.reply_text("ℹ️ Wasn't authorized.")
-        except:
-            update.message.reply_text("⚠️ Usage: /unauthorize <user_id>")
+# --- START ---
 
-    def handle_text(self, update: Update, context: CallbackContext):
-        message = update.message.text or update.message.caption or ""
-        user = update.effective_user
-        if self.contains_links(message) and user.id not in self.authorized_users:
-            update.message.delete()
-            self.warn_user(update, context, "🔗 Links require authorization!")
-        elif self.contains_bad_content(message):
-            update.message.delete()
-            self.ban_user(update, context, "🚫 Banned for policy violation")
+@app.on_message(filters.command("start"))
+async def start(_, m: Message):
+    await m.reply("🤖 Bot is online and guarding this group!")
 
-    def handle_media(self, update: Update, context: CallbackContext):
-        user = update.effective_user
-        if user.id in self.authorized_users:
-            return
-        try:
-            file = None
-            if update.message.photo:
-                file = update.message.photo[-1].get_file()
-            elif update.message.document:
-                file = update.message.document.get_file()
-            if not file:
-                return
-            file_bytes = BytesIO()
-            file.download(out=file_bytes)
-            with open('temp_image.jpg', 'wb') as f:
-                f.write(file_bytes.getvalue())
-            results = nude_detector.detect('temp_image.jpg')
-            logger.info(f"NSFW results: {results}")
-            for result in results:
-                if result['class'] in ['EXPOSED_GENITALIA_F', 'EXPOSED_GENITALIA_M', 'EXPOSED_BREAST_F']:
-                    update.message.delete()
-                    self.ban_user(update, context, "🔞 NSFW Content")
-                    return
-            os.remove("temp_image.jpg")
-        except Exception as e:
-            logger.error(f"Media error: {e}")
-
-    def handle_stickers(self, update: Update, context: CallbackContext):
-        user = update.effective_user
-        if user.id in self.authorized_users:
-            return
-        sticker = update.message.sticker
-        if not sticker:
-            return
-        try:
-            file = sticker.get_file()
-            file_bytes = BytesIO()
-            file.download(out=file_bytes)
-            with open('temp_sticker.webp', 'wb') as f:
-                f.write(file_bytes.getvalue())
-            results = nude_detector.detect('temp_sticker.webp')
-            logger.info(f"NSFW Sticker results: {results}")
-            for result in results:
-                if result['class'] in ['EXPOSED_GENITALIA_F', 'EXPOSED_GENITALIA_M', 'EXPOSED_BREAST_F']:
-                    update.message.delete()
-                    self.ban_user(update, context, "🔞 NSFW Sticker")
-                    return
-            os.remove("temp_sticker.webp")
-        except Exception as e:
-            logger.error(f"Sticker error: {e}")
-
-    def contains_links(self, text):
-        urls = re.findall(r'https?://\S+', text.lower())
-        for url in urls:
-            if not any(domain in url for domain in self.whitelisted_domains):
-                return True
-        return False
-
-    def contains_bad_content(self, text):
-        text_lower = text.lower()
-        return (
-            any(kw in text_lower for kw in self.promo_keywords) or
-            any(kw in text_lower for kw in self.drug_keywords) or
-            any(kw in text_lower for kw in self.weapon_keywords)
-        )
-
-    def warn_user(self, update: Update, context: CallbackContext, message: str):
-        try:
-            context.bot.send_message(
-                chat_id=update.message.chat_id,
-                text=f"👮 @{update.effective_user.username or 'User'} {message}",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.error(f"Warning error: {e}")
-
-    def ban_user(self, update: Update, context: CallbackContext, reason: str):
-        try:
-            context.bot.ban_chat_member(
-                chat_id=update.message.chat_id,
-                user_id=update.effective_user.id,
-                until_date=datetime.now() + timedelta(days=1)
-            )
-            context.bot.send_message(
-                chat_id=update.message.chat_id,
-                text=f"🚨 @{update.effective_user.username or 'User'} banned: {reason}",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.error(f"Ban error: {e}")
-
-    def error_handler(self, update: Update, context: CallbackContext):
-        logger.error(f'Update "{update}" caused error "{context.error}"')
-
-    def run(self):
-        server_thread = threading.Thread(target=run_health_server)
-        server_thread.daemon = True
-        server_thread.start()
-        self.updater.start_polling(drop_pending_updates=True)
-        logger.info("Bot is now running!")
-        self.updater.idle()
-
-if __name__ == '__main__':
-    bot = GroupSecurityBot()
-    bot.run()
+print("Bot running...")
+app.run()
