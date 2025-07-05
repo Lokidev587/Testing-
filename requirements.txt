@@ -3,8 +3,8 @@ opencv-python-headless==4.6.0.66
 numpy==1.26.2
 python-dotenv==0.19.0
 Pillow==10.3.0
-nsfw-detector==1.0.7
-tensorflow-cpu==2.15.0
+git+https://github.com/notAI-tech/NudeNet.git@v0.4.6
+tensorflow-cpu==2.5.0
 tgcrypto==1.2.4
 pyrogram==2.0.106
 flask==3.0.2
