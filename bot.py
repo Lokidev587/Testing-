@@ -2,15 +2,16 @@ import logging
 import re
 import os
 import json
-from flask import Flask, request
+import threading
+from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from nudenet import NudeDetector
+import asyncio
 
 # -------------------- CONFIG --------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 123456789))
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Example: https://your-app.onrender.com/webhook
 AUTH_FILE = 'authorized.json'
 SPAM_WORDS = ["spam", "badword1", "offensiveword"]
 
@@ -106,34 +107,29 @@ async def filter_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # -------------------- FLASK SERVER --------------------
 app = Flask(__name__)
-telegram_app = None  # Will hold our bot app instance
 
 @app.route('/')
 def home():
-    return '✅ Bot is running.', 200
+    return '✅ Bot is alive', 200
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    if telegram_app:
-        return telegram_app.webhook_handler(request)
-    return "Bot not initialized", 500
-
-# -------------------- MAIN START --------------------
-async def main():
-    global telegram_app
-    telegram_app = await ApplicationBuilder().token(BOT_TOKEN).build()
-
-    telegram_app.add_handler(CommandHandler('start', start))
-    telegram_app.add_handler(CommandHandler('authorize', authorize))
-    telegram_app.add_handler(CommandHandler('unauthorize', unauthorize))
-    telegram_app.add_handler(MessageHandler(filters.ALL, filter_messages))
-
-    logger.info("Setting webhook...")
-    await telegram_app.bot.set_webhook(WEBHOOK_URL)
-
-    # Run Flask app (in same process)
+def run_server():
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 
+# -------------------- MAIN --------------------
+async def run_bot():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('authorize', authorize))
+    application.add_handler(CommandHandler('unauthorize', unauthorize))
+    application.add_handler(MessageHandler(filters.ALL, filter_messages))
+
+    logger.info("🤖 Bot started polling.")
+    await application.run_polling()
+
 if __name__ == '__main__':
-    import asyncio
-    asyncio.run(main())
+    # Start Flask server in another thread
+    threading.Thread(target=run_server, daemon=True).start()
+
+    # Run Telegram bot in the main event loop
+    asyncio.run(run_bot())
