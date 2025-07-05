@@ -1,5 +1,8 @@
 import os
 import logging
+import tempfile
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 from telegram import Update
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.ext import (
@@ -11,9 +14,6 @@ from telegram.ext import (
     CallbackContext
 )
 from nudenet import NudeDetector
-import tempfile
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
 
 # Configure logging
 logging.basicConfig(
@@ -27,9 +27,9 @@ detector = NudeDetector()
 
 # Bot configuration
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-AUTHORIZED_USERS = {}  # Format: {chat_id: [user_ids]}
-GROUP_ADMINS = {}      # Format: {chat_id: [user_ids]}
-GROUP_OWNERS = {}      # Format: {chat_id: user_id}
+AUTHORIZED_USERS = {}  # {chat_id: [user_ids]}
+GROUP_ADMINS = {}      # {chat_id: [user_ids]}
+GROUP_OWNERS = {}      # {chat_id: user_id}
 
 # NSFW classes to detect
 NSFW_CLASSES = [
@@ -52,12 +52,28 @@ def run_dummy_server(port=8080):
     server = HTTPServer(('0.0.0.0', port), DummyHandler)
     server.serve_forever()
 
+async def refresh_admins(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Refresh admin list for a chat"""
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        admin_ids = [admin.user.id for admin in admins]
+        owner = next((admin for admin in admins if admin.status == ChatMemberStatus.OWNER), None)
+        
+        if owner:
+            GROUP_OWNERS[chat_id] = owner.user.id
+            GROUP_ADMINS[chat_id] = admin_ids
+            if chat_id not in AUTHORIZED_USERS:
+                AUTHORIZED_USERS[chat_id] = admin_ids.copy()
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error refreshing admins: {e}")
+        return False
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a message when the command /start is issued."""
     await update.message.reply_text('Hi! I will help manage links and NSFW content in this group.')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send a message when the command /help is issued."""
     help_text = """
     Group Management Bot Help:
     
@@ -74,7 +90,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text)
 
 async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Track which chats the bot is in and store admin/owner info."""
     try:
         if update.effective_message is None:
             return
@@ -85,31 +100,21 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
             return
 
-        # Get chat administrators
-        admins = await context.bot.get_chat_administrators(chat_id)
-        admin_ids = [admin.user.id for admin in admins]
-        
-        # Find the owner
-        owner = next((admin for admin in admins if admin.status == ChatMemberStatus.OWNER), None)
-        
-        if owner:
-            GROUP_OWNERS[chat_id] = owner.user.id
-            GROUP_ADMINS[chat_id] = admin_ids
-            
-            if chat_id not in AUTHORIZED_USERS:
-                AUTHORIZED_USERS[chat_id] = admin_ids.copy()
-            
-            logger.info(f"Tracked chat {chat_id} with owner {owner.user.id}")
+        await refresh_admins(chat_id, context)
     except Exception as e:
         logger.error(f"Error tracking chats: {e}")
 
 async def authorize_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Authorize a user to post links."""
     try:
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         
-        # Check if the command user is the owner
+        # Refresh admin list first
+        if not await refresh_admins(chat_id, context):
+            await update.message.reply_text("Could not fetch admin information. Please try again.")
+            return
+        
+        # Verify ownership
         if chat_id not in GROUP_OWNERS or GROUP_OWNERS[chat_id] != user_id:
             await update.message.reply_text("Only the group owner can authorize users.")
             return
@@ -121,20 +126,18 @@ async def authorize_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = context.args[0].strip('@')
         
         try:
-            # Get user ID from username
             member = await context.bot.get_chat_member(chat_id, username)
             target_user_id = member.user.id
             
-            # Add to authorized users
-            if chat_id in AUTHORIZED_USERS:
-                if target_user_id not in AUTHORIZED_USERS[chat_id]:
-                    AUTHORIZED_USERS[chat_id].append(target_user_id)
-                    await update.message.reply_text(f"User @{username} is now authorized to post links.")
-                else:
-                    await update.message.reply_text(f"User @{username} is already authorized.")
-            else:
-                AUTHORIZED_USERS[chat_id] = [target_user_id]
+            # Initialize if not exists
+            if chat_id not in AUTHORIZED_USERS:
+                AUTHORIZED_USERS[chat_id] = []
+            
+            if target_user_id not in AUTHORIZED_USERS[chat_id]:
+                AUTHORIZED_USERS[chat_id].append(target_user_id)
                 await update.message.reply_text(f"User @{username} is now authorized to post links.")
+            else:
+                await update.message.reply_text(f"User @{username} is already authorized.")
                 
         except Exception as e:
             logger.error(f"Error authorizing user: {e}")
@@ -143,12 +146,16 @@ async def authorize_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in authorize_user: {e}")
 
 async def unauthorize_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Remove a user's authorization to post links."""
     try:
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         
-        # Check if the command user is the owner
+        # Refresh admin list first
+        if not await refresh_admins(chat_id, context):
+            await update.message.reply_text("Could not fetch admin information. Please try again.")
+            return
+        
+        # Verify ownership
         if chat_id not in GROUP_OWNERS or GROUP_OWNERS[chat_id] != user_id:
             await update.message.reply_text("Only the group owner can unauthorize users.")
             return
@@ -160,11 +167,9 @@ async def unauthorize_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = context.args[0].strip('@')
         
         try:
-            # Get user ID from username
             member = await context.bot.get_chat_member(chat_id, username)
             target_user_id = member.user.id
             
-            # Remove from authorized users
             if chat_id in AUTHORIZED_USERS and target_user_id in AUTHORIZED_USERS[chat_id]:
                 AUTHORIZED_USERS[chat_id].remove(target_user_id)
                 await update.message.reply_text(f"User @{username} is no longer authorized to post links.")
@@ -178,131 +183,108 @@ async def unauthorize_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error in unauthorize_user: {e}")
 
 async def delete_message(context: CallbackContext):
-    """Delete a message."""
     try:
-        chat_id = context.job.chat_id
-        message_id = context.job.message_id
-        await context.bot.delete_message(chat_id, message_id)
+        await context.bot.delete_message(context.job.chat_id, context.job.message_id)
     except Exception as e:
         logger.error(f"Error deleting message: {e}")
 
 def is_nsfw(detections):
-    """Check if any detection is NSFW based on our defined classes."""
-    for detection in detections:
-        if detection['class'] in NSFW_CLASSES and detection['score'] > 0.7:  # 70% confidence threshold
-            return True
-    return False
+    return any(detection['class'] in NSFW_CLASSES and detection['score'] > 0.7 for detection in detections)
 
 async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle messages containing links."""
     try:
-        if update.effective_message is None or update.effective_chat is None:
+        if not update.effective_message or not update.effective_chat:
             return
         
         chat_id = update.effective_chat.id
         user_id = update.effective_user.id
         
-        # Skip if message doesn't contain links or user is authorized/admin/owner
-        if not update.effective_message.entities:
+        # Skip if no links or authorized
+        if not update.effective_message.entities or not any(
+            e.type == "url" for e in update.effective_message.entities
+        ):
             return
         
-        # Check for URL entities
-        has_links = any(entity.type == "url" for entity in update.effective_message.entities)
-        if not has_links:
+        # Check authorization
+        is_authorized = (
+            (chat_id in AUTHORIZED_USERS and user_id in AUTHORIZED_USERS[chat_id]) or
+            (chat_id in GROUP_ADMINS and user_id in GROUP_ADMINS[chat_id]) or
+            (chat_id in GROUP_OWNERS and user_id == GROUP_OWNERS[chat_id])
+        )
+        if is_authorized:
             return
         
-        # Allow links from authorized users, admins, and owner
-        if (chat_id in AUTHORIZED_USERS and user_id in AUTHORIZED_USERS[chat_id]) or \
-           (chat_id in GROUP_ADMINS and user_id in GROUP_ADMINS[chat_id]) or \
-           (chat_id in GROUP_OWNERS and user_id == GROUP_OWNERS[chat_id]):
-            return
-        
-        # Delete the message with links
         try:
             await update.effective_message.delete()
             warning = await update.effective_chat.send_message(
                 f"@{update.effective_user.username} Only authorized users can post links. "
                 "Contact the group owner for authorization."
             )
-            
-            # Delete warning after 10 seconds
             context.job_queue.run_once(
-                delete_message,
-                10,
+                delete_message, 10,
                 chat_id=chat_id,
                 message_id=warning.message_id,
                 name=str(warning.message_id)
-            )
-            
         except Exception as e:
-            logger.error(f"Error deleting message: {e}")
+            logger.error(f"Error handling links: {e}")
     except Exception as e:
         logger.error(f"Error in handle_links: {e}")
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle media messages and check for NSFW content."""
     try:
-        if update.effective_message is None or update.effective_chat is None:
+        if not update.effective_message or not update.effective_chat:
             return
         
-        # Skip if message doesn't contain media
-        if not (update.effective_message.photo or 
-                update.effective_message.animation or 
-                update.effective_message.sticker or 
-                update.effective_message.video or 
-                update.effective_message.document):
+        if not any([
+            update.effective_message.photo,
+            update.effective_message.animation,
+            update.effective_message.sticker,
+            update.effective_message.video,
+            update.effective_message.document
+        ]):
             return
         
         try:
-            # Download the media file
             file = await context.bot.get_file(update.effective_message.effective_attachment.file_id)
-            file_bytes = await file.download_as_bytearray()
-            
-            # Create a temporary file
-            with tempfile.NamedTemporaryFile(suffix='.jpg') as temp_file:
-                temp_file.write(file_bytes)
-                temp_file.flush()
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
+                file_path = temp_file.name
+                await file.download_to_drive(file_path)
                 
-                # Detect NSFW content
-                detections = detector.detect(temp_file.name)
-                
-                # Check if any NSFW content was detected
-                if is_nsfw(detections):
-                    await update.effective_message.delete()
-                    warning = await update.effective_chat.send_message(
-                        f"@{update.effective_user.username} NSFW content detected and removed. "
-                        "Please keep the group safe for work."
-                    )
-                    
-                    # Delete warning after 10 seconds
-                    context.job_queue.run_once(
-                        delete_message,
-                        10,
-                        chat_id=update.effective_chat.id,
-                        message_id=warning.message_id,
-                        name=str(warning.message_id)
-                    )
-        
+                try:
+                    detections = detector.detect(file_path)
+                    if is_nsfw(detections):
+                        await update.effective_message.delete()
+                        warning = await update.effective_chat.send_message(
+                            f"@{update.effective_user.username} NSFW content detected and removed. "
+                            "Please keep the group safe for work."
+                        )
+                        context.job_queue.run_once(
+                            delete_message, 10,
+                            chat_id=update.effective_chat.id,
+                            message_id=warning.message_id,
+                            name=str(warning.message_id))
+                finally:
+                    try:
+                        os.unlink(file_path)
+                    except Exception as e:
+                        logger.error(f"Error deleting temp file: {e}")
         except Exception as e:
             logger.error(f"Error handling media: {e}")
     except Exception as e:
         logger.error(f"Error in handle_media: {e}")
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log errors and send a message if possible."""
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=context.error)
-    
     if update and update.effective_message:
         try:
             await update.effective_message.reply_text(
-                "An error occurred while processing your request. Please try again later."
+                "An error occurred. Please try again or contact support."
             )
         except Exception as e:
             logger.error(f"Error sending error message: {e}")
 
 def main():
-    """Start the bot."""
-    # Start dummy server in a separate thread if on Render
+    # Start dummy server if on Render
     if os.getenv('RENDER'):
         port = int(os.getenv('PORT', 8080))
         server_thread = threading.Thread(target=run_dummy_server, args=(port,))
@@ -310,33 +292,30 @@ def main():
         server_thread.start()
         logger.info(f"Dummy server started on port {port}")
 
-    # Create the Application
+    # Create and configure application
     application = Application.builder().token(BOT_TOKEN).build()
     
     # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("authorize", authorize_user))
-    application.add_handler(CommandHandler("unauthorize", unauthorize_user))
+    handlers = [
+        CommandHandler("start", start),
+        CommandHandler("help", help_command),
+        CommandHandler("authorize", authorize_user),
+        CommandHandler("unauthorize", unauthorize_user),
+        MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER, track_chats),
+        MessageHandler(filters.TEXT & (~filters.COMMAND), handle_links),
+        MessageHandler(
+            filters.PHOTO | filters.ANIMATION | filters.Sticker.ALL | 
+            filters.VIDEO | filters.Document.ALL,
+            handle_media
+        )
+    ]
     
-    # Track chats the bot is added to or removed from
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, track_chats))
-    application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, track_chats))
+    for handler in handlers:
+        application.add_handler(handler)
     
-    # Handle links in messages
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_links))
-    
-    # Handle media messages for NSFW detection
-    application.add_handler(MessageHandler(
-        filters.PHOTO | filters.ANIMATION | filters.Sticker.ALL | filters.VIDEO | filters.Document.ALL,
-        handle_media
-    ))
-    
-    # Add error handler
     application.add_error_handler(error_handler)
     
-    # Run the bot
-    logger.info("Bot is starting...")
+    logger.info("Starting bot...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
