@@ -7,3 +7,4 @@ nudenet==3.4.2
 tgcrypto==1.2.4
 pyrogram==2.0.106
 flask==3.0.2
+python-telegram-bot[job-queue]==20.8
