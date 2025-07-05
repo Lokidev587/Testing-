@@ -1,9 +1,9 @@
 import logging
-import re
 import os
+import re
 import json
 import threading
-from flask import Flask
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from nudenet import NudeDetector
@@ -105,31 +105,35 @@ async def filter_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message.sticker:
         await message.delete()
 
-# -------------------- FLASK SERVER --------------------
-app = Flask(__name__)
+# -------------------- DUMMY HTTP SERVER --------------------
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"✅ Bot is running.")
 
-@app.route('/')
-def home():
-    return '✅ Bot is alive', 200
+def start_http_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    logger.info(f"🌐 Dummy HTTP server running on port {port}")
+    server.serve_forever()
 
-def run_server():
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
-
-# -------------------- MAIN --------------------
+# -------------------- BOT START --------------------
 async def run_bot():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('authorize', authorize))
-    application.add_handler(CommandHandler('unauthorize', unauthorize))
-    application.add_handler(MessageHandler(filters.ALL, filter_messages))
+    app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('authorize', authorize))
+    app.add_handler(CommandHandler('unauthorize', unauthorize))
+    app.add_handler(MessageHandler(filters.ALL, filter_messages))
 
     logger.info("🤖 Bot started polling.")
-    await application.run_polling()
+    await app.run_polling()
 
 if __name__ == '__main__':
-    # Start Flask server in another thread
-    threading.Thread(target=run_server, daemon=True).start()
+    # Start the HTTP server in a separate thread
+    threading.Thread(target=start_http_server, daemon=True).start()
 
-    # Run Telegram bot in the main event loop
+    # Start the Telegram bot in the main async event loop
     asyncio.run(run_bot())
