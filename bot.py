@@ -1,6 +1,7 @@
 import os
 import logging
 import tempfile
+import cv2
 from PIL import Image
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
@@ -246,28 +247,33 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         file_id = None
         suffix = '.jpg'
+        file_type = None
 
-        # Detect static sticker
-        is_sticker = False
-        if message.sticker and not message.sticker.is_animated:
-            file_id = message.sticker.file_id
-            suffix = '.webp'
-            is_sticker = True
+        if message.sticker:
+            if message.sticker.is_video:
+                file_id = message.sticker.file_id
+                suffix = '.webm'
+                file_type = 'video_sticker'
+            elif message.sticker.is_animated:
+                logger.info("Skipping .tgs animated sticker")
+                return
+            else:
+                file_id = message.sticker.file_id
+                suffix = '.webp'
+                file_type = 'image_sticker'
 
         elif message.photo:
             file_id = message.photo[-1].file_id
             suffix = '.jpg'
+            file_type = 'photo'
 
-        elif message.document:
-            if not message.document.mime_type.startswith("image/"):
-                logger.info("Skipping non-image document")
-                return
+        elif message.document and message.document.mime_type.startswith("image/"):
             file_id = message.document.file_id
             suffix = '.' + message.document.file_name.split('.')[-1]
+            file_type = 'document'
 
-        if not file_id:
-            logger.info("No supported media type to process")
-            return
+        else:
+            return  # unsupported media
 
         telegram_file = await context.bot.get_file(file_id)
 
@@ -275,23 +281,38 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_path = temp_file.name
             await telegram_file.download_to_drive(file_path)
 
-        # Convert sticker to JPG for NudeNet
-        if is_sticker:
+        # If it's webp sticker → convert
+        if file_type == 'image_sticker':
             try:
                 im = Image.open(file_path).convert("RGB")
-                sticker_jpg = file_path.replace('.webp', '.jpg')
-                im.save(sticker_jpg, "JPEG")
+                new_path = file_path.replace('.webp', '.jpg')
+                im.save(new_path, "JPEG")
                 os.unlink(file_path)
-                file_path = sticker_jpg
+                file_path = new_path
             except Exception as e:
                 logger.error(f"Sticker conversion failed: {e}")
+                return
+
+        # If it's webm (video sticker) → extract frame
+        elif file_type == 'video_sticker':
+            try:
+                vidcap = cv2.VideoCapture(file_path)
+                success, frame = vidcap.read()
+                if not success:
+                    logger.error("Failed to read frame from .webm")
+                    return
+                new_path = file_path.replace('.webm', '.jpg')
+                cv2.imwrite(new_path, frame)
+                os.unlink(file_path)
+                file_path = new_path
+            except Exception as e:
+                logger.error(f"Frame extract failed: {e}")
                 return
 
         if os.path.getsize(file_path) == 0:
             logger.warning("Empty media file")
             return
 
-        # Run NudeNet detection
         detections = detector.detect(file_path)
         logger.info(f"Detections: {detections}")
 
@@ -301,7 +322,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if is_nsfw(detections):
             await message.delete()
             warn = await update.effective_chat.send_message(
-                f"@{user.username or user.first_name}, NSFW content (sticker/image) detected and removed."
+                f"@{user.username or user.first_name}, NSFW content detected and removed."
             )
             context.job_queue.run_once(
                 delete_message, 10,
