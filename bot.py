@@ -1,6 +1,7 @@
 import os
 import logging
 import tempfile
+from PIL import Image
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 from telegram import Update
@@ -233,51 +234,91 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in handle_links: {e}")
 
+
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not update.effective_message or not update.effective_chat:
             return
-        
-        if not any([
-            update.effective_message.photo,
-            update.effective_message.animation,
-            update.effective_message.sticker,
-            update.effective_message.video,
-            update.effective_message.document
-        ]):
+
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        message = update.effective_message
+
+        file_id = None
+        suffix = '.jpg'
+
+        # Detect static sticker
+        is_sticker = False
+        if message.sticker and not message.sticker.is_animated:
+            file_id = message.sticker.file_id
+            suffix = '.webp'
+            is_sticker = True
+
+        elif message.photo:
+            file_id = message.photo[-1].file_id
+            suffix = '.jpg'
+
+        elif message.document:
+            if not message.document.mime_type.startswith("image/"):
+                logger.info("Skipping non-image document")
+                return
+            file_id = message.document.file_id
+            suffix = '.' + message.document.file_name.split('.')[-1]
+
+        if not file_id:
+            logger.info("No supported media type to process")
             return
-        
-        try:
-            file = await context.bot.get_file(update.effective_message.effective_attachment.file_id)
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as temp_file:
-                file_path = temp_file.name
-                await file.download_to_drive(file_path)
-                
-                try:
-                    detections = detector.detect(file_path)
-                    if is_nsfw(detections):
-                        await update.effective_message.delete()
-                        warning = await update.effective_chat.send_message(
-                            f"@{update.effective_user.username} NSFW content detected and removed. "
-                            "Please keep the group safe for work."
-                        )
-                        
-                        # Fixed: Properly closed parentheses
-                        context.job_queue.run_once(
-                            delete_message,
-                            10,
-                            chat_id=update.effective_chat.id,
-                            message_id=warning.message_id,
-                            name=str(warning.message_id))
-                finally:
-                    try:
-                        os.unlink(file_path)
-                    except Exception as e:
-                        logger.error(f"Error deleting temp file: {e}")
-        except Exception as e:
-            logger.error(f"Error handling media: {e}")
+
+        telegram_file = await context.bot.get_file(file_id)
+
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+            file_path = temp_file.name
+            await telegram_file.download_to_drive(file_path)
+
+        # Convert sticker to JPG for NudeNet
+        if is_sticker:
+            try:
+                im = Image.open(file_path).convert("RGB")
+                sticker_jpg = file_path.replace('.webp', '.jpg')
+                im.save(sticker_jpg, "JPEG")
+                os.unlink(file_path)
+                file_path = sticker_jpg
+            except Exception as e:
+                logger.error(f"Sticker conversion failed: {e}")
+                return
+
+        if os.path.getsize(file_path) == 0:
+            logger.warning("Empty media file")
+            return
+
+        # Run NudeNet detection
+        detections = detector.detect(file_path)
+        logger.info(f"Detections: {detections}")
+
+        def is_nsfw(dets):
+            return any(d['class'] in NSFW_CLASSES and d['score'] > 0.5 for d in dets)
+
+        if is_nsfw(detections):
+            await message.delete()
+            warn = await update.effective_chat.send_message(
+                f"@{user.username or user.first_name}, NSFW content (sticker/image) detected and removed."
+            )
+            context.job_queue.run_once(
+                delete_message, 10,
+                chat_id=chat_id,
+                message_id=warn.message_id,
+                name=str(warn.message_id)
+            )
+
     except Exception as e:
-        logger.error(f"Error in handle_media: {e}")
+        logger.error(f"handle_media() error: {e}")
+
+    finally:
+        try:
+            if 'file_path' in locals() and os.path.exists(file_path):
+                os.unlink(file_path)
+        except Exception as e:
+            logger.warning(f"Temp file cleanup failed: {e}")
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=context.error)
