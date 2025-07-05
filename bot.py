@@ -6,16 +6,16 @@ import threading
 from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from nsfw_detector import predict
+from nudenet import NudeClassifier
 
 # -------------------- CONFIG --------------------
 BOT_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'  # Replace this
-OWNER_ID = 123456789  # Replace with your numeric Telegram user ID
+OWNER_ID = 123456789  # Replace this with your numeric Telegram user ID
 AUTH_FILE = 'authorized.json'
-SPAM_WORDS = ["spam", "badword1", "offensiveword", "test"]  # Add spam words here
+SPAM_WORDS = ["spam", "badword1", "offensiveword"]  # Customize as needed
 # ------------------------------------------------
 
-# Setup logging
+# -------------------- LOGGING --------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -33,17 +33,17 @@ def save_authorized(users):
 authorized_users = load_authorized()
 
 # -------------------- NSFW DETECTOR --------------------
-logger.info("Loading NSFW detector model. This may take a few seconds...")
-model = predict.load_model()  # Downloads the model on first run
-logger.info("NSFW detector loaded successfully.")
+logger.info("Loading NudeNet NSFW model. This may take ~10 sec on first run...")
+classifier = NudeClassifier()  # Automatically downloads the model if not present
+logger.info("✅ NudeNet model loaded.")
 
-# -------------------- COMMANDS --------------------
+# -------------------- COMMAND HANDLERS --------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 NSFW, Link & Spam Filter Bot is running!")
 
 async def authorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 You are not authorized to use this command.")
+        await update.message.reply_text("🚫 You're not authorized to use this command.")
         return
     if context.args:
         username = context.args[0].lstrip('@')
@@ -55,7 +55,7 @@ async def authorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def unauthorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 You are not authorized to use this command.")
+        await update.message.reply_text("🚫 You're not authorized to use this command.")
         return
     if context.args:
         username = context.args[0].lstrip('@')
@@ -65,7 +65,7 @@ async def unauthorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Usage: /unauthorize @username")
 
-# -------------------- MESSAGE HANDLER --------------------
+# -------------------- MESSAGE FILTERING --------------------
 async def filter_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     sender_username = message.from_user.username or ''
@@ -74,9 +74,9 @@ async def filter_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message.text and any(word.lower() in message.text.lower() for word in SPAM_WORDS):
         try:
             await message.delete()
-            logger.info(f"Deleted spam word message from @{sender_username}")
+            logger.info(f"Deleted spam from @{sender_username}")
         except Exception as e:
-            logger.error(f"Error deleting spam message: {e}")
+            logger.error(f"Error deleting spam: {e}")
         return
 
     # --- Link Filter ---
@@ -96,16 +96,16 @@ async def filter_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file = await media[-1].get_file() if isinstance(media, list) else await media.get_file()
             file_path = await file.download_to_drive()
 
-            results = predict.classify(model, file_path)
+            result = classifier.classify(file_path)
             os.remove(file_path)
 
-            prediction = results.get(file_path, {})
-            # NSFW threshold: 60%
-            if prediction.get("porn", 0) > 0.6 or prediction.get("sexy", 0) > 0.6:
+            score = result[file_path]
+            if score.get("unsafe", 0) > 0.6 or score.get("porn", 0) > 0.6:
                 await message.delete()
                 logger.info(f"Deleted NSFW media from @{sender_username}")
+
         except Exception as e:
-            logger.error(f"NSFW detection error: {e}")
+            logger.error(f"NSFW detection failed: {e}")
 
     # --- Delete Stickers (webp, tgs, etc.) ---
     if message.sticker:
@@ -115,17 +115,17 @@ async def filter_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Error deleting sticker: {e}")
 
-# -------------------- DUMMY FLASK SERVER --------------------
+# -------------------- FLASK SERVER --------------------
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return '✅ Bot is alive.', 200
+    return '✅ Bot is alive', 200
 
 def run_server():
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
 
-# -------------------- BOT MAIN --------------------
+# -------------------- BOT LAUNCH --------------------
 async def run_bot():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -134,10 +134,10 @@ async def run_bot():
     app.add_handler(CommandHandler('unauthorize', unauthorize))
     app.add_handler(MessageHandler(filters.ALL, filter_messages))
 
-    logger.info("🤖 Bot started and polling for updates.")
+    logger.info("🤖 Bot is polling...")
     await app.run_polling()
 
-# -------------------- ENTRY POINT --------------------
+# -------------------- MAIN ENTRY --------------------
 if __name__ == '__main__':
     threading.Thread(target=run_server).start()
 
