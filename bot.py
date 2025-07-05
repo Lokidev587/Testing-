@@ -1,140 +1,112 @@
 import logging
-import os
-import re
-import json
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-from nudenet import NudeDetector
 import asyncio
+import os
 
-# -------------------- CONFIG --------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OWNER_ID = int(os.environ.get("OWNER_ID", 123456789))
-AUTH_FILE = 'authorized.json'
-SPAM_WORDS = ["spam", "badword1", "offensiveword"]
+from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
 
-# -------------------- LOGGING --------------------
-logging.basicConfig(level=logging.INFO)
+from nudenet import NudeDetector
+
+# ================== CONFIG ==================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+NSFW_CLASSES = {
+    "FEMALE_GENITALIA_EXPOSED",
+    "FEMALE_BREAST_EXPOSED",
+    "MALE_GENITALIA_EXPOSED",
+    "ANUS_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+    "BELLY_EXPOSED",
+    "ARMPITS_EXPOSED"
+}
+# ============================================
+
+# Set up logging
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# -------------------- AUTHORIZED USERS --------------------
-def load_authorized():
-    if os.path.exists(AUTH_FILE):
-        with open(AUTH_FILE, 'r') as f:
-            return set(json.load(f))
-    return set()
-
-def save_authorized(users):
-    with open(AUTH_FILE, 'w') as f:
-        json.dump(list(users), f)
-
-authorized_users = load_authorized()
-
-# -------------------- NSFW DETECTOR --------------------
+# Load NudeDetector once
 logger.info("Loading NudeDetector...")
 detector = NudeDetector()
 logger.info("✅ NudeDetector ready.")
 
-def is_nsfw(file_path):
-    try:
-        results = detector.detect(file_path)
-        return any(d.get("score", 0) > 0.6 for d in results)
-    except Exception as e:
-        logger.error(f"NSFW detection error: {e}")
-        return False
-
-# -------------------- COMMANDS --------------------
+# /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 NSFW, Link & Spam Filter Bot is running!")
+    await update.message.reply_text("🤖 Bot is running and monitoring media for NSFW content.")
 
-async def authorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 You're not authorized.")
-        return
-    if context.args:
-        username = context.args[0].lstrip('@')
-        authorized_users.add(username)
-        save_authorized(authorized_users)
-        await update.message.reply_text(f"✅ Authorized @{username}")
-    else:
-        await update.message.reply_text("Usage: /authorize @username")
-
-async def unauthorize(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 You're not authorized.")
-        return
-    if context.args:
-        username = context.args[0].lstrip('@')
-        authorized_users.discard(username)
-        save_authorized(authorized_users)
-        await update.message.reply_text(f"❌ Unauthorized @{username}")
-    else:
-        await update.message.reply_text("Usage: /unauthorize @username")
-
-# -------------------- MESSAGE FILTER --------------------
-async def filter_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    sender_username = message.from_user.username or ''
-
-    # Spam word filter
-    if message.text and any(word in message.text.lower() for word in SPAM_WORDS):
-        await message.delete()
+# Check media content for nudity
+async def nsfw_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
         return
 
-    # Link filter
-    if message.text and re.search(r'https?://|www\.|\S+\.\S+', message.text):
-        if sender_username not in authorized_users:
-            await message.delete()
-        return
+    file = None
+    try:
+        if update.message.photo:
+            file = await update.message.photo[-1].get_file()
+        elif update.message.video:
+            file = await update.message.video.get_file()
+        elif update.message.animation:
+            file = await update.message.animation.get_file()
+        elif update.message.sticker and update.message.sticker.is_video:
+            file = await update.message.sticker.get_file()
+        elif update.message.document and update.message.document.mime_type.startswith("image/"):
+            file = await update.message.document.get_file()
+        else:
+            return  # Not a media we check
 
-    # NSFW Media filter
-    media = message.photo or message.document or message.video or message.animation
-    if media:
+        file_path = await file.download_to_drive()
+        detections = detector.detect(file_path)
+
+        # Check if NSFW class is found
+        for detection in detections:
+            if detection["class"] in NSFW_CLASSES:
+                await update.message.delete()
+                logger.info(f"❌ Deleted NSFW content sent by {update.effective_user.id}")
+                break
+
+        os.remove(file_path)  # Clean up
+
+    except Exception as e:
+        logger.error(f"Error in nsfw_filter: {e}")
+
+# Delete links from any user or admin
+async def link_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message and ("http://" in update.message.text or "https://" in update.message.text):
         try:
-            file = await media[-1].get_file() if isinstance(media, list) else await media.get_file()
-            file_path = await file.download_to_drive()
-            if is_nsfw(file_path):
-                await message.delete()
-            os.remove(file_path)
+            await update.message.delete()
+            logger.info(f"🔗 Deleted link from {update.effective_user.id}")
         except Exception as e:
-            logger.error(f"Error checking media: {e}")
+            logger.error(f"Couldn't delete message: {e}")
 
-    # Delete stickers
-    if message.sticker:
-        await message.delete()
-
-# -------------------- DUMMY HTTP SERVER --------------------
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write("✅ Bot is running.".encode('utf-8'))
-
-
-def start_http_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
-    logger.info(f"🌐 Dummy HTTP server running on port {port}")
-    server.serve_forever()
-
-# -------------------- BOT START --------------------
-async def run_bot():
+# Run bot
+async def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('authorize', authorize))
-    app.add_handler(CommandHandler('unauthorize', unauthorize))
-    app.add_handler(MessageHandler(filters.ALL, filter_messages))
+    app.add_handler(CommandHandler("start", start))
+
+    # Media message handler
+    app.add_handler(MessageHandler(
+        filters.PHOTO |
+        filters.VIDEO |
+        filters.ANIMATION |
+        filters.Document.IMAGE |
+        filters.Sticker.VIDEO,
+        nsfw_filter
+    ))
+
+    # Link deletion
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"http[s]?://"), link_filter))
 
     logger.info("🤖 Bot started polling.")
     await app.run_polling()
 
-if __name__ == '__main__':
-    # Start the HTTP server in a separate thread
-    threading.Thread(target=start_http_server, daemon=True).start()
-
-    # Start the Telegram bot in the main async event loop
-    asyncio.run(run_bot())
+if __name__ == "__main__":
+    asyncio.run(main())
