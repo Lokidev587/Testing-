@@ -221,10 +221,12 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Contact the group owner for authorization."
             )
             context.job_queue.run_once(
-                delete_message, 10,
+                delete_message,
+                10,
                 chat_id=chat_id,
                 message_id=warning.message_id,
                 name=str(warning.message_id)
+            )
         except Exception as e:
             logger.error(f"Error handling links: {e}")
     except Exception as e:
@@ -259,12 +261,11 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             "Please keep the group safe for work."
                         )
                         context.job_queue.run_once(
-                            delete_message, 
+                            delete_message,
                             10,
                             chat_id=update.effective_chat.id,
                             message_id=warning.message_id,
                             name=str(warning.message_id)
-                        )
                 finally:
                     try:
                         os.unlink(file_path)
