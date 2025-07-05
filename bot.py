@@ -317,7 +317,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"Detections: {detections}")
 
         def is_nsfw(dets):
-            return any(d['class'] in NSFW_CLASSES and d['score'] > 0.2 for d in dets)
+            return any(d['class'] in NSFW_CLASSES and d['score'] > 0.1 for d in dets)
 
         if is_nsfw(detections):
             await message.delete()
