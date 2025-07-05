@@ -109,9 +109,10 @@ async def filter_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain")
+        self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"✅ Bot is running.")
+        self.wfile.write("✅ Bot is running.".encode('utf-8'))
+
 
 def start_http_server():
     port = int(os.environ.get("PORT", 8080))
