@@ -11,8 +11,6 @@ from telegram.ext import (
     CallbackContext
 )
 from nudenet import NudeDetector
-from PIL import Image
-import io
 import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
@@ -77,16 +75,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Track which chats the bot is in and store admin/owner info."""
-    if update.effective_message is None:
-        return
-
-    chat = update.effective_message.chat
-    chat_id = chat.id
-
-    if chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
-        return
-
     try:
+        if update.effective_message is None:
+            return
+
+        chat = update.effective_message.chat
+        chat_id = chat.id
+
+        if chat.type not in [ChatType.GROUP, ChatType.SUPERGROUP]:
+            return
+
         # Get chat administrators
         admins = await context.bot.get_chat_administrators(chat_id)
         admin_ids = [admin.user.id for admin in admins]
@@ -234,6 +232,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 message_id=warning.message_id,
                 name=str(warning.message_id)
+            )
             
         except Exception as e:
             logger.error(f"Error deleting message: {e}")
@@ -282,6 +281,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         chat_id=update.effective_chat.id,
                         message_id=warning.message_id,
                         name=str(warning.message_id)
+                    )
         
         except Exception as e:
             logger.error(f"Error handling media: {e}")
