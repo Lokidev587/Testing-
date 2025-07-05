@@ -279,7 +279,7 @@ def main():
     
     # Handle media messages for NSFW detection
     application.add_handler(MessageHandler(
-        filters.PHOTO | filters.ANIMATION | filters.STICKER | filters.VIDEO | filters.Document.ALL,
+        filters.PHOTO | filters.ANIMATION | filters.Sticker.ALL  | filters.VIDEO | filters.Document.ALL,
         handle_media
     ))
     
