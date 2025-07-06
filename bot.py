@@ -199,7 +199,10 @@ async def unauthorize_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def delete_message(context: CallbackContext):
     try:
-        await context.bot.delete_message(context.job.chat_id, context.job.message_id)
+        job_data = context.job.data
+        chat_id = job_data['chat_id']
+        message_id = job_data['message_id']
+        await context.bot.delete_message(chat_id, message_id)
     except Exception as e:
         logger.error(f"Error deleting message: {e}")
 
@@ -343,13 +346,13 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             warn = await update.effective_chat.send_message(
                 f"@{user.username or user.first_name}, NSFW content detected and removed."
             )
-            if context.job_queue:
-                context.job_queue.run_once(
-                    delete_message, 10,
-                    chat_id=chat_id,
-                    message_id=warn.message_id,
-                    name=str(warn.message_id)
-                )
+           if context.job_queue:
+    context.job_queue.run_once(
+        delete_message,
+        when=10,
+        data={'chat_id': chat_id, 'message_id': warn.message_id},
+        name=str(warn.message_id)
+    )
 
     except Exception as e:
         logger.error(f"handle_media() error: {e}")
