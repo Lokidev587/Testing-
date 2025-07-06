@@ -240,19 +240,17 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Contact the group owner for authorization."
             )
             
-            # Fixed: Properly closed parentheses
             if context.job_queue:
-    context.job_queue.run_once(  # ✅ Fixed indentation
-        delete_message,
-        10,
-        data={"chat_id": chat_id, "message_id": warning.message_id},
-        name=str(warning.message_id)
-    )
+                context.job_queue.run_once(
+                    delete_message,
+                    10,
+                    data={"chat_id": chat_id, "message_id": warning.message_id},
+                    name=str(warning.message_id)
+                )
         except Exception as e:
             logger.error(f"Error handling links: {e}")
     except Exception as e:
         logger.error(f"Error in handle_links: {e}")
-
 
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -320,7 +318,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Video sticker (.webm)
         elif file_type == 'video_sticker':
             try:
-                import cv2
                 vidcap = cv2.VideoCapture(file_path)
                 frame_count = 0
 
@@ -347,14 +344,14 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             if context.job_queue:
-    try:
-        context.job_queue.run_once(  # ✅ Fixed indentation
-            delete_message,
-            10,
-            data={"chat_id": chat_id, "message_id": warn.message_id},
-            name=str(warn.message_id)
-    except Exception as e:
-        logger.error(f"Failed to schedule message deletion: {e}")
+                try:
+                    context.job_queue.run_once(
+                        delete_message,
+                        10,
+                        data={"chat_id": chat_id, "message_id": warn.message_id},
+                        name=str(warn.message_id)
+                except Exception as e:
+                    logger.error(f"Failed to schedule message deletion: {e}")
 
     except Exception as e:
         logger.error(f"handle_media() error: {e}")
