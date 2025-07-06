@@ -200,9 +200,10 @@ async def unauthorize_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delete_message(context: CallbackContext):
     try:
         job_data = context.job.data
-        chat_id = job_data['chat_id']
-        message_id = job_data['message_id']
-        await context.bot.delete_message(chat_id, message_id)
+        await context.bot.delete_message(
+            chat_id=job_data["chat_id"],
+            message_id=job_data["message_id"]
+        )
     except Exception as e:
         logger.error(f"Error deleting message: {e}")
 
@@ -240,12 +241,13 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             # Fixed: Properly closed parentheses
-            context.job_queue.run_once(
-                delete_message,
-                10,
-                chat_id=chat_id,
-                message_id=warning.message_id,
-                name=str(warning.message_id))
+            if context.job_queue:
+    context.job_queue.run_once(
+        delete_message,
+        10,
+        data={"chat_id": chat_id, "message_id": warning.message_id},
+        name=str(warning.message_id)
+    )
         except Exception as e:
             logger.error(f"Error handling links: {e}")
     except Exception as e:
@@ -346,12 +348,11 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if context.job_queue:
                 try:
-                    context.job_queue.run_once(
-                        delete_message,
-                        10,
-                        data={"chat_id": chat_id, "message_id": warn.message_id},
-                        name=str(warn.message_id)
-                    )
+                       context.job_queue.run_once(
+        delete_message, 10,
+        data={"chat_id": chat_id, "message_id": warn.message_id},
+        name=str(warn.message_id)
+    )
                 except Exception as e:
                     logger.error(f"Failed to schedule message deletion: {e}")
 
