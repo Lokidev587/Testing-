@@ -346,15 +346,13 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             warn = await update.effective_chat.send_message(
                 f"@{user.username or user.first_name}, NSFW content detected and removed."
             )
-            
-try:
-    if context.job_queue:
-        context.job_queue.run_once(
-            delete_message,
-            when=10,
-            data={'chat_id': chat_id, 'message_id': warn.message_id},
-            name=str(warn.message_id)
-        )
+if context.job_queue:
+context.job_queue.run_once(
+    delete_message,
+    when=10,
+    data={'chat_id': chat_id, 'message_id': warning.message_id},
+    name=str(warning.message_id)
+)
 except Exception as e:
     logger.error(f"Failed to schedule message deletion: {e}")
 
