@@ -317,29 +317,26 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Video sticker (.webm)
         elif file_type == 'video_sticker':
-    try:
-        vidcap = cv2.VideoCapture(file_path)
-        frame_count = 0
-        frames_to_scan = 3  # Faster: scan only 3 frames
+            try:
+                vidcap = cv2.VideoCapture(file_path)
+                frame_count = 0
+                frames_to_scan = 3
 
-        while frame_count < frames_to_scan:
-            success, frame = vidcap.read()
-            if not success:
-                break
-            frame_path = f"/tmp/frame_{frame_count}.jpg"
-            cv2.imwrite(frame_path, frame)
+                while frame_count < frames_to_scan:
+                    success, frame = vidcap.read()
+                    if not success:
+                        break
+                    frame_path = f"/tmp/frame_{frame_count}.jpg"
+                    cv2.imwrite(frame_path, frame)
+                    frame_dets = detector.detect(frame_path)
+                    detections.extend(frame_dets)
+                    os.unlink(frame_path)
+                    frame_count += 1
 
-            # Detect NSFW from this frame
-            frame_dets = detector.detect(frame_path)
-            detections.extend(frame_dets)
-
-            os.unlink(frame_path)
-            frame_count += 1
-
-        vidcap.release()
-    except Exception as e:
-        logger.error(f"Error processing webm video: {e}")
-        return
+                vidcap.release()
+            except Exception as e:
+                logger.error(f"Error processing webm video: {e}")
+                return
 
         if is_nsfw(detections):
             await message.delete()
@@ -354,8 +351,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         10,
                         data={"chat_id": chat_id, "message_id": warn.message_id},
                         name=str(warn.message_id)
-                        )
-                       
+                    )
                 except Exception as e:
                     logger.error(f"Failed to schedule message deletion: {e}")
 
