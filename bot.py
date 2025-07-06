@@ -341,17 +341,18 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         def is_nsfw(dets):
             return any(d['class'] in NSFW_CLASSES and d['score'] > 0.1 for d in dets)
 
-        if is_nsfw(detections):
-            await message.delete()
-            warn = await update.effective_chat.send_message(
-                f"@{user.username or user.first_name}, NSFW content detected and removed."
-            )
-  if context.job_queue:
-                context.job_queue.run_once(
-                    delete_message_callback, 10,
-                    data={"chat_id": chat_id, "message_id": warn.message_id},
-                    name=str(warn.message_id)
-                )
+       if is_nsfw(detections):
+    await message.delete()
+    warn = await update.effective_chat.send_message(
+        f"@{user.username or user.first_name}, NSFW content detected and removed."
+    )
+
+    if context.job_queue:
+        context.job_queue.run_once(
+            delete_message_callback, 10,
+            data={"chat_id": chat_id, "message_id": warn.message_id},
+            name=str(warn.message_id)
+        )
 except Exception as e:
     logger.error(f"Failed to schedule message deletion: {e}")
 
