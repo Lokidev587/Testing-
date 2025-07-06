@@ -350,6 +350,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         10,
                         data={"chat_id": chat_id, "message_id": warn.message_id},
                         name=str(warn.message_id)
+                        )
+                       
                 except Exception as e:
                     logger.error(f"Failed to schedule message deletion: {e}")
 
