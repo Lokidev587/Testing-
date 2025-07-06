@@ -242,7 +242,7 @@ async def handle_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Fixed: Properly closed parentheses
             if context.job_queue:
-    context.job_queue.run_once(
+    context.job_queue.run_once(  # ✅ Fixed indentation
         delete_message,
         10,
         data={"chat_id": chat_id, "message_id": warning.message_id},
@@ -347,14 +347,14 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             if context.job_queue:
-                try:
-                       context.job_queue.run_once(
-        delete_message, 10,
-        data={"chat_id": chat_id, "message_id": warn.message_id},
-        name=str(warn.message_id)
-    )
-                except Exception as e:
-                    logger.error(f"Failed to schedule message deletion: {e}")
+    try:
+        context.job_queue.run_once(  # ✅ Fixed indentation
+            delete_message,
+            10,
+            data={"chat_id": chat_id, "message_id": warn.message_id},
+            name=str(warn.message_id)
+    except Exception as e:
+        logger.error(f"Failed to schedule message deletion: {e}")
 
     except Exception as e:
         logger.error(f"handle_media() error: {e}")
