@@ -317,25 +317,29 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Video sticker (.webm)
         elif file_type == 'video_sticker':
-            try:
-                vidcap = cv2.VideoCapture(file_path)
-                frame_count = 0
+    try:
+        vidcap = cv2.VideoCapture(file_path)
+        frame_count = 0
+        frames_to_scan = 3  # Faster: scan only 3 frames
 
-                while True:
-                    success, frame = vidcap.read()
-                    if not success or frame_count > 30:  # Limit to 30 frames
-                        break
-                    if frame_count % 5 == 0:  # Every 5th frame
-                        frame_path = f"/tmp/frame_{frame_count}.jpg"
-                        cv2.imwrite(frame_path, frame)
-                        frame_dets = detector.detect(frame_path)
-                        detections.extend(frame_dets)
-                        os.unlink(frame_path)
-                    frame_count += 1
-                vidcap.release()
-            except Exception as e:
-                logger.error(f"Error processing webm video: {e}")
-                return
+        while frame_count < frames_to_scan:
+            success, frame = vidcap.read()
+            if not success:
+                break
+            frame_path = f"/tmp/frame_{frame_count}.jpg"
+            cv2.imwrite(frame_path, frame)
+
+            # Detect NSFW from this frame
+            frame_dets = detector.detect(frame_path)
+            detections.extend(frame_dets)
+
+            os.unlink(frame_path)
+            frame_count += 1
+
+        vidcap.release()
+    except Exception as e:
+        logger.error(f"Error processing webm video: {e}")
+        return
 
         if is_nsfw(detections):
             await message.delete()
