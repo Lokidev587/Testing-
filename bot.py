@@ -346,7 +346,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             warn = await update.effective_chat.send_message(
                 f"@{user.username or user.first_name}, NSFW content detected and removed."
             )
-           if context.job_queue:
+            
+if context.job_queue:
     context.job_queue.run_once(
         delete_message,
         when=10,
