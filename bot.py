@@ -36,10 +36,23 @@ GROUP_OWNERS = {}      # {chat_id: user_id}
 # NSFW classes to detect
 NSFW_CLASSES = [
     "FEMALE_GENITALIA_EXPOSED",
-    "BUTTOCKS_EXPOSED",
+    "FEMALE_GENITALIA_COVERED",
     "FEMALE_BREAST_EXPOSED",
+    "FEMALE_BREAST_COVERED",
     "MALE_GENITALIA_EXPOSED",
-    "ANUS_EXPOSED"
+    "MALE_BREAST_EXPOSED",
+    "ANUS_EXPOSED",
+    "ANUS_COVERED",
+    "BUTTOCKS_EXPOSED",
+    "BUTTOCKS_COVERED",
+    "BELLY_EXPOSED",
+    "BELLY_COVERED",
+    "FEET_EXPOSED",
+    "FEET_COVERED",
+    "ARMPITS_EXPOSED",
+    "ARMPITS_COVERED",
+    "FACE_FEMALE",
+    "FACE_MALE"
 ]
 
 # Dummy HTTP server for Render
@@ -86,8 +99,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Commands:
     /start - Start the bot
     /help - Show this help message
-    /authorize @username - Authorize a user to post links (owner only)
-    /unauthorize @username - Remove user's link posting privileges (owner only)
+    /authorize @userid - Authorize a user to post links (owner only)
+    /unauthorize @userid - Remove user's link posting privileges (owner only)
     """
     await update.message.reply_text(help_text)
 
@@ -271,9 +284,8 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_id = message.document.file_id
             suffix = '.' + message.document.file_name.split('.')[-1]
             file_type = 'document'
-
         else:
-            return  # unsupported media
+            return
 
         telegram_file = await context.bot.get_file(file_id)
 
@@ -281,7 +293,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file_path = temp_file.name
             await telegram_file.download_to_drive(file_path)
 
-        # If it's webp sticker → convert
+        detections = []
+
+        # Static sticker (.webp)
         if file_type == 'image_sticker':
             try:
                 im = Image.open(file_path).convert("RGB")
@@ -289,32 +303,37 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 im.save(new_path, "JPEG")
                 os.unlink(file_path)
                 file_path = new_path
+                detections = detector.detect(file_path)
             except Exception as e:
                 logger.error(f"Sticker conversion failed: {e}")
                 return
 
-        # If it's webm (video sticker) → extract frame
+        # Photo/document
+        elif file_type in ['photo', 'document']:
+            detections = detector.detect(file_path)
+
+        # Video sticker (.webm)
         elif file_type == 'video_sticker':
             try:
+                import cv2
                 vidcap = cv2.VideoCapture(file_path)
-                success, frame = vidcap.read()
-                if not success:
-                    logger.error("Failed to read frame from .webm")
-                    return
-                new_path = file_path.replace('.webm', '.jpg')
-                cv2.imwrite(new_path, frame)
-                os.unlink(file_path)
-                file_path = new_path
+                frame_count = 0
+
+                while True:
+                    success, frame = vidcap.read()
+                    if not success or frame_count > 30:  # Limit to 30 frames
+                        break
+                    if frame_count % 5 == 0:  # Every 5th frame
+                        frame_path = f"/tmp/frame_{frame_count}.jpg"
+                        cv2.imwrite(frame_path, frame)
+                        frame_dets = detector.detect(frame_path)
+                        detections.extend(frame_dets)
+                        os.unlink(frame_path)
+                    frame_count += 1
+                vidcap.release()
             except Exception as e:
-                logger.error(f"Frame extract failed: {e}")
+                logger.error(f"Error processing webm video: {e}")
                 return
-
-        if os.path.getsize(file_path) == 0:
-            logger.warning("Empty media file")
-            return
-
-        detections = detector.detect(file_path)
-        logger.info(f"Detections: {detections}")
 
         def is_nsfw(dets):
             return any(d['class'] in NSFW_CLASSES and d['score'] > 0.1 for d in dets)
@@ -324,17 +343,16 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             warn = await update.effective_chat.send_message(
                 f"@{user.username or user.first_name}, NSFW content detected and removed."
             )
-        
-            context.job_queue.run_once(
-                delete_message, 10,
-                chat_id=chat_id,
-                message_id=warn.message_id,
-                name=str(warn.message_id)
-            )
+            if context.job_queue:
+                context.job_queue.run_once(
+                    delete_message, 10,
+                    chat_id=chat_id,
+                    message_id=warn.message_id,
+                    name=str(warn.message_id)
+                )
 
     except Exception as e:
         logger.error(f"handle_media() error: {e}")
-
     finally:
         try:
             if 'file_path' in locals() and os.path.exists(file_path):
