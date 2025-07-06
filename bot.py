@@ -338,9 +338,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Error processing webm video: {e}")
                 return
 
-               def is_nsfw(dets):
-            return any(d['class'] in NSFW_CLASSES and d['score'] > 0.1 for d in dets)
-
         if is_nsfw(detections):
             await message.delete()
             warn = await update.effective_chat.send_message(
@@ -357,7 +354,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception as e:
                     logger.error(f"Failed to schedule message deletion: {e}")
-
 
     except Exception as e:
         logger.error(f"handle_media() error: {e}")
